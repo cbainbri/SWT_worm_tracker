@@ -5,7 +5,7 @@ General workflow: tracking.py -> track_editor.py ->track_mask.py
 
 This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected image input directory) which include x,y centroid positions, worm ID, and masked logic to determine when an animal is on/off food (or other geometric space in the environment).
 
-**tracking.py **
+**tracking.py**
 Setup and background - Script performs background generation from 75 images sampled from image data. 
 
 Threshold and QC - After background generation, this tab allows for quality control during thresholding. It takes a random 5 background-subtracted images for quality control for thresholding worms. We offer two tracking algorithms, Greedy or Hungarian depending on needs. Tracking parameters are set for worm detection optimized for our recording, but can be adjusted as needed. Blob size thresholding is most useful for filtering debris and small non moving particles that are still thresholded. Search radius is the limiting distance for the next detected frame during tracking. Track weightings are to account for animal "momentum" and correct for worm intersections and ID switching. In particular it prevents tracks from "ricocheting" after intersection. For example a 0.7 track weight means that worm behavior is 70% predictable by past behavior). Minimum track length filters tracks below a certain frame length. Hitting track will track using these parameters. 
