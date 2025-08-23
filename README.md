@@ -1,4 +1,4 @@
-# SWF_worm_tracker
+# SWT_worm_tracker
 A simple C. elegans multi worm tracker and masking for border encounters.
 
 General workflow: tracking.py -> track_editor.py ->track_mask.py
