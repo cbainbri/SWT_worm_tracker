@@ -1,6 +1,8 @@
 # SWT_worm_tracker
 A simple C. elegans multi worm tracker and masking for border encounters.
 
+Read requirements.txt for basic outline of python dependencies necessary for script use.
+
 General workflow: tracking.py -> track_editor.py ->track_mask.py
 
 This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected image input directory) which include x,y centroid positions, worm ID, and masked logic to determine when an animal is on/off food (or other geometric space in the environment).
