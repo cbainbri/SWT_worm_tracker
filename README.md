@@ -58,30 +58,30 @@ Note - if automatic_mask errors run git lfs pull again. If errors persist run:
    
 
 
-### RUNNING SCRIPTS
-# Run following commands inside SWT_worm_tracker root directory
+# RUNNING SCRIPTS
+#### Run following commands inside SWT_worm_tracker root directory
 
-# Tracking GUI
+#### Tracking GUI
 python tracking.py
 
-# Batch processing
+#### Batch processing
 python batch_tracking.py
 
-# Track editor (with images + CSV)
+#### Track editor (with images + CSV)
 python track_editor.py 
 
-# Automatic mask (with SAM or PNG fallback)
+#### Automatic mask (with SAM or PNG fallback)
 python automatic_mask.py
 
-# Manual mask creation
+#### Manual mask creation
 python manual_mask.py
-##############################
+
 
 General workflow: tracking.py -> track_editor.py ->track_mask.py
 
 This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected input directories) which include worm ID, x,y centroid positions,nose positions, and masking logic to determine when an animal encounters food borders (or other geometric space in the environment).
 
-**tracking.py** or **batch_tracking.py**
+##**tracking.py** or **batch_tracking.py**
 
 Setup and background - Script performs background generation from 75 images sampled from image data. 
 
@@ -90,21 +90,21 @@ Threshold and QC - After background generation, this tab allows for quality cont
 Tracking Results- will summarize statistics and allow you to save the initial tracking result CSV. Export CSV (export simple csv for debugging) will provide initial tracking results. 
 
 
-**batch_tracking.py**
+##**batch_tracking.py**
 
 This script will launch a GUI that will allow you to select multiple experimental directories. It will then analyze each selected directory sequentially, saving tracks.csv files back to the input directories. 
 
 
-**track_editor.py**
+##**track_editor.py**
 
 This script is designed to view and edit tracks generated from tracking.py or batch_tracking.py. This is done by loading tracks.csv and the image directory. This will allow you to view and clean up tracks from the initial CSV. By entereing track selection mode you can delete tracks selectively or select keep tracks to delete all but the ones you have selected. Additionally you can selectively merge tracks that might have dropped do to thresholding errors, or contrast issues. When complete you can export these tracks. You will now have a finalized CSV relevant only to animal locomotion. 
 
-**automatic_mask.py**
+##**automatic_mask.py**
 This tool allows you to load an image from the image directory, and click to select features of interest for automated masking. This is usually quite robust, and draws from the sam-vit-L checkpoint file. -NOTE This is tracked via github and git pull LFS should pull the necessary checkpoint file (1-2gb). If running automatic mask gives a no SAM model error, re-run git lfs pull. If there are still errors run 
 pip install git+https://github.com/facebookresearch/segment-anything.git 
 
 
- **track_mask.py**
+##**track_mask.py**
 
 This tool allows you to load a single image to annotate static background features, in our case food border, by tracing. This is done by loading an image and tracing the mask. Hitting generate mask will then provide a binary mask jpg.Importantly, there is a checkbox for what the mask is detecting. In our case again it is on/off food, but essentially this checkbox just switches the binary mask logic. This tool also allows you to analyze traced masks against your cleaned up track coordinates to analyze on/off food status (or other positional status). This is done by loading the generated binary mask and the csv file and hitting process CSV. The new CSV will have a new column next to each worm that shows boolean logic defined by the user for on/off food. 
 
