@@ -1,13 +1,84 @@
 # SWT_worm_tracker
 A simple C. elegans multi worm tracker and masking for border encounters.
 
-Read requirements.txt for basic outline of python dependencies necessary for script use.
+# Worm Tracking Toolkit
+
+This repository contains Python tools for worm tracking, mask generation (manual or automatic with **Segment Anything**), batch processing, and track editing.
+
+---
+
+## Installation
+#This toolkit requires Python 3.9–3.12 (recommended: 3.11 for best compatibility).
+
+### 1. Clone the Repository 
+```bash
+git clone https://github.com/cbainbri/SWT_worm_tracker.git
+cd SWT_worm_tracker
+
+or download zip file 
+
+
+## REQUIRED DEPENDENCIES
+
+## Windows 10/11 Powershell
+winget install Git.Git
+winget install GitHub.GitLFS
+git lfs install
+pip install --upgrade pip
+pip install -r requirements.txt
+git lfs pull
+
+#  MacOS
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
+brew install python git git-lfs tcl-tk
+git lfs install
+pip install --upgrade pip
+pip install -r requirements.txt
+git lfs pull
+
+#Linux
+sudo apt update
+sudo apt install -y python3 python3-venv python3-pip python3-tk git git-lfs libgl1
+git lfs install
+pip install --upgrade pip
+pip install -r requirements.txt
+git lfs pull
+
+
+⚠️ By default, requirements.txt installs the CPU-only PyTorch build.
+If you need GPU acceleration (CUDA or ROCm), uninstall torch and reinstall the appropriate wheel from PyTorch.org
+
+
+Note - if automatic_mask errors run git lfs pull again. If errors persist run: 
+    pip install git+https://github.com/facebookresearch/segment-anything.git
+    cd segment-anything
+   
+
+
+### RUNNING SCRIPTS
+# Run following commands inside SWT_worm_tracker root directory
+
+# Tracking GUI
+python tracking.py
+
+# Batch processing
+python batch_tracking.py
+
+# Track editor (with images + CSV)
+python track_editor.py 
+
+# Automatic mask (with SAM or PNG fallback)
+python automatic_mask.py
+
+# Manual mask creation
+python manual_mask.py
+##############################
 
 General workflow: tracking.py -> track_editor.py ->track_mask.py
 
-This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected image input directory) which include x,y centroid positions, worm ID, and masked logic to determine when an animal is on/off food (or other geometric space in the environment).
+This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected input directories) which include worm ID, x,y centroid positions,nose positions, and masking logic to determine when an animal encounters food borders (or other geometric space in the environment).
 
-**tracking.py**
+**tracking.py** or **batch_tracking.py**
 
 Setup and background - Script performs background generation from 75 images sampled from image data. 
 
@@ -15,9 +86,20 @@ Threshold and QC - After background generation, this tab allows for quality cont
 
 Tracking Results- will summarize statistics and allow you to save the initial tracking result CSV. Export CSV (export simple csv for debugging) will provide initial tracking results. 
 
+
+**batch_tracking.py**
+
+This script will launch a GUI that will allow you to select multiple experimental directories. It will then analyze each selected directory sequentially, saving tracks.csv files back to the input directories. 
+
+
 **track_editor.py**
 
-This script is designed to view and edit the initial track CSV. this is done by loading the initial CSV from tracking.py, and the image directory. This will allow you to view and clean up tracks from the initial CSV. By entereing track selection mode you can delete tracks selectively or select keep tracks to delete all but the ones you have selected. Additionally you can selectively merge tracks that might have dropped do to thresholding errors, or contrast issues. When complete you can export these tracks. You will now have a finalized CSV relevant only to animal locomotion. 
+This script is designed to view and edit tracks generated from tracking.py or batch_tracking.py. This is done by loading tracks.csv and the image directory. This will allow you to view and clean up tracks from the initial CSV. By entereing track selection mode you can delete tracks selectively or select keep tracks to delete all but the ones you have selected. Additionally you can selectively merge tracks that might have dropped do to thresholding errors, or contrast issues. When complete you can export these tracks. You will now have a finalized CSV relevant only to animal locomotion. 
+
+**automatic_mask.py**
+This tool allows you to load an image from the image directory, and click to select features of interest for automated masking. This is usually quite robust, and draws from the sam-vit-L checkpoint file. -NOTE This is tracked via github and git pull LFS should pull the necessary checkpoint file (1-2gb). If running automatic mask gives a no SAM model error, re-run git lfs pull. If there are still errors run 
+pip install git+https://github.com/facebookresearch/segment-anything.git 
+
 
  **track_mask.py**
 

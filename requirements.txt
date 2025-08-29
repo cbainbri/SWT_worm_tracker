@@ -1,19 +1,27 @@
-# Quick install (Linux/Mac/Windows):
-# pip install numpy pandas opencv-python matplotlib Pillow scipy tifffile scikit-image psutil torch torchvision
-#
+
+#Python and pip are required for this to run
+
 # ⚠️ Note for Linux users:
 # Tkinter (needed for GUI) is not pip-installable.
 # Install it via your system package manager, e.g.:
 #   sudo apt-get install python3-tk
 
-numpy            # Core numerical arrays and math
-pandas           # DataFrames, CSV loading/saving
-opencv-python    # Image processing (cv2)
-matplotlib       # Plotting, visualization, embedded GUIs
-Pillow           # Image loading/manipulation (PIL)
-scipy            # Scientific functions, Hungarian algorithm, etc.
-tifffile         # Efficient TIFF file support
-scikit-image     # Alternative image I/O and utilities
-psutil           # System memory info (used for caching optimization)
-torch		 # Segment anything implementation for automatic masking
-torchvision	 # Segment anything implementation for automatic masking
+matplotlib==3.10.5
+numpy==2.2.6
+opencv-python==4.12.0.88
+pandas==2.3.1
+pillow==11.3.0
+psutil==7.0.0
+scikit-image==0.25.2
+scipy==1.16.1
+tifffile==2025.6.11
+
+# PyTorch CPU-only by default (GPU users: see README note)
+torch==2.8.0
+torchvision==0.23.0
+
+# Segment Anything for automatic mask
+git+https://github.com/facebookresearch/segment-anything.git@dca509fe793f601edb92606367a655c15ac00fdf#egg=segment_anything
+
+
+

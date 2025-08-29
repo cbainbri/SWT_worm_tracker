@@ -234,11 +234,24 @@ class AutoMaskNoseApp:
                         model_type = "vit_l"
                     else:
                         model_type = "vit_b"
-                    sam = sam_model_registry[model_type](checkpoint=checkpoint)
+                    # Initialize model WITHOUT passing checkpoint so we control torch.load defaults
+                    model = sam_model_registry[model_type]()
+                    # Robust load across torch versions (2.6+ default changed to weights_only=True)
+                    try:
+                        state = torch.load(checkpoint, map_location="cpu", weights_only=False)
+                    except TypeError:
+                        # Older torch versions don't accept weights_only kwarg
+                        state = torch.load(checkpoint, map_location="cpu")
+                    # Unwrap common wrappers
+                    if isinstance(state, dict) and "state_dict" in state:
+                        state = state["state_dict"]
+                    missing, unexpected = model.load_state_dict(state, strict=False)
+                    if missing or unexpected:
+                        self.progress_queue.put(f"SAM state_dict: missing={len(missing)} unexpected={len(unexpected)}")
                     device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
                     self.progress_queue.put(f"Moving SAM to {device.upper()}...")
-                    sam.to(device=device)
-                    self.sam_predictor = SamPredictor(sam)
+                    model.to(device=device)
+                    self.sam_predictor = SamPredictor(model)
                     self.progress_queue.put(f"SAM loaded: {model_type} ({device.upper()})")
                 except Exception as e:
                     self.progress_queue.put(f"SAM auto-load failed: {e}")
@@ -268,10 +281,19 @@ class AutoMaskNoseApp:
                     model_type = "vit_l"
                 else:
                     model_type = "vit_b"
-                sam = sam_model_registry[model_type](checkpoint=path)
+                model = sam_model_registry[model_type]()
+                try:
+                    state = torch.load(path, map_location="cpu", weights_only=False)
+                except TypeError:
+                    state = torch.load(path, map_location="cpu")
+                if isinstance(state, dict) and "state_dict" in state:
+                    state = state["state_dict"]
+                missing, unexpected = model.load_state_dict(state, strict=False)
+                if missing or unexpected:
+                    self.progress_queue.put(f"SAM state_dict: missing={len(missing)} unexpected={len(unexpected)}")
                 device = "cuda" if (torch and torch.cuda.is_available()) else "cpu"
-                sam.to(device=device)
-                self.sam_predictor = SamPredictor(sam)
+                model.to(device=device)
+                self.sam_predictor = SamPredictor(model)
                 self.progress_queue.put(f"SAM loaded: {model_type} ({device.upper()})")
             except Exception as e:
                 self.progress_queue.put(f"Failed to load SAM: {e}")
