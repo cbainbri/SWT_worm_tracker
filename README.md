@@ -14,36 +14,39 @@ This repository contains Python tools for worm tracking, mask generation (manual
 ```bash
 git clone https://github.com/cbainbri/SWT_worm_tracker.git
 cd SWT_worm_tracker
-
+```
 or download zip file 
 
 
 ## REQUIRED DEPENDENCIES
 
 ## Windows 10/11 Powershell
+```bash
 winget install Git.Git
 winget install GitHub.GitLFS
 git lfs install
 pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
-
+```
 #  MacOS
+```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
 brew install python git git-lfs tcl-tk
 git lfs install
 pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
-
+```
 #Linux
+```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-tk git git-lfs libgl1
 git lfs install
 pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
-
+```
 
 ⚠️ By default, requirements.txt installs the CPU-only PyTorch build.
 If you need GPU acceleration (CUDA or ROCm), uninstall torch and reinstall the appropriate wheel from PyTorch.org
