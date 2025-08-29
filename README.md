@@ -56,20 +56,25 @@ If you need GPU acceleration (CUDA or ROCm), uninstall torch and reinstall the a
 ## Run following commands inside SWT_worm_tracker root directory
 
 ### Tracking GUI
+```bash
 python tracking.py
-
+```
 ### Batch processing
+```bash
 python batch_tracking.py
-
+```
 ### Track editor (with images + CSV)
+```bash
 python track_editor.py 
-
+```
 ### Automatic mask (with SAM or PNG fallback)
+```bash
 python automatic_mask.py
-
+```
 ### Manual mask creation
+```bash
 python manual_mask.py
-
+```
 
 # General workflow: 
 ## tracking.py -> track_editor.py ->track_mask.py
