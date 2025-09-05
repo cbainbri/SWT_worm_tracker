@@ -15,7 +15,6 @@ Requirements: pandas, numpy, matplotlib, seaborn, scipy
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import warnings
@@ -23,17 +22,26 @@ from scipy import stats
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+# Try to import seaborn, set flag if available
+try:
+    import seaborn as sns
+    HAS_SEABORN = True
+except ImportError:
+    HAS_SEABORN = False
+    print("Warning: seaborn not available. Using matplotlib defaults for plotting.")
+
 # Suppress warnings for cleaner output
 warnings.filterwarnings('ignore', category=RuntimeWarning)
 
 class FoodEncounterAnalyzer:
     """Main analysis class for food encounter velocity analysis"""
     
-    def __init__(self):
+    def __init__(self, pixels_per_mm: float = 104.0):
         self.data = None
         self.velocity_data = None
         self.encounter_aligned_data = None
         self.summary_stats = None
+        self.pixels_per_mm = pixels_per_mm
         
     def load_data(self, csv_path: str) -> bool:
         """Load composite CSV data"""
@@ -83,6 +91,11 @@ class FoodEncounterAnalyzer:
             # Calculate distance and velocity
             distance = np.sqrt(dx**2 + dy**2)
             velocity = distance / dt
+            
+            # Convert to mm/s if pixels_per_mm is provided
+            if self.pixels_per_mm > 0:
+                velocity = velocity / self.pixels_per_mm
+                distance = distance / self.pixels_per_mm
             
             # Apply smoothing window if specified
             if time_window > 0 and len(velocity) > 3:
@@ -206,6 +219,43 @@ class FoodEncounterAnalyzer:
         self.summary_stats = pd.DataFrame(summary_data)
         return self.summary_stats
     
+    def analyze_food_leaving_behavior(self) -> Optional[pd.DataFrame]:
+        """Analyze velocity patterns when animals leave food areas"""
+        if self.velocity_data is None:
+            print("No velocity data available for food leaving analysis")
+            return None
+            
+        print("Analyzing food leaving behavior...")
+        
+        leaving_data = []
+        
+        for animal_id in self.velocity_data['animal_id'].unique():
+            animal_data = self.velocity_data[self.velocity_data['animal_id'] == animal_id].sort_values('time').copy()
+            
+            # Find transitions from food encounter to no encounter
+            food_shifts = animal_data['food_encounter'].diff()
+            leaving_times = animal_data[food_shifts == -1]['time'].values
+            
+            for leave_time in leaving_times:
+                # Get data around leaving event
+                window_data = animal_data[
+                    (animal_data['time'] >= leave_time - 60) & 
+                    (animal_data['time'] <= leave_time + 60)
+                ].copy()
+                
+                if len(window_data) > 10:  # Minimum data points
+                    window_data['relative_time'] = window_data['time'] - leave_time
+                    window_data['event_type'] = 'food_leaving'
+                    leaving_data.append(window_data)
+        
+        if leaving_data:
+            result = pd.concat(leaving_data, ignore_index=True)
+            print(f"Found {len(leaving_data)} food leaving events")
+            return result
+        else:
+            print("No food leaving events found")
+            return None
+    
     def print_summary_report(self) -> None:
         """Print human-readable summary report"""
         if self.summary_stats is None:
@@ -228,6 +278,9 @@ class FoodEncounterAnalyzer:
         print(f"  Short-term after:   5 to 15 seconds") 
         print(f"  Long-term before: -120 to -15 seconds")
         print(f"  Long-term after:   15 to 120 seconds")
+        
+        velocity_unit = "mm/s" if self.pixels_per_mm > 0 else "pixels/time"
+        print(f"\nVelocity units: {velocity_unit}")
         
         # Group results
         for idx, row in self.summary_stats.iterrows():
@@ -253,7 +306,8 @@ class FoodEncounterAnalyzer:
         
         print("\n" + "="*80)
     
-    def plot_velocity_profiles(self, save_plots: bool = True, output_dir: str = "plots") -> None:
+    def plot_velocity_profiles(self, save_plots: bool = True, output_dir: str = "plots", 
+                             show_individual_traces: bool = False) -> None:
         """Create velocity profile plots"""
         if self.encounter_aligned_data is None:
             print("No aligned data available for plotting")
@@ -272,6 +326,8 @@ class FoodEncounterAnalyzer:
         else:
             # Use matplotlib color cycle if seaborn not available
             plt.rcParams['axes.prop_cycle'] = plt.cycler(color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'])
+        
+        velocity_unit = "mm/s" if self.pixels_per_mm > 0 else "pixels/time"
         
         # 1. Overall velocity profile plot
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -308,7 +364,7 @@ class FoodEncounterAnalyzer:
         ax.axvline(x=-15, color='gray', linestyle=':', alpha=0.5)
         ax.axvline(x=15, color='gray', linestyle=':', alpha=0.5)
         ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel('Velocity (pixels/time unit)')
+        ax.set_ylabel(f'Velocity ({velocity_unit})')
         ax.set_title('All Groups')
         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
         ax.grid(True, alpha=0.3)
@@ -335,7 +391,7 @@ class FoodEncounterAnalyzer:
         
         ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
         ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel('Velocity')
+        ax.set_ylabel(f'Velocity ({velocity_unit})')
         ax.set_title('By Treatment')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -362,7 +418,7 @@ class FoodEncounterAnalyzer:
         
         ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
         ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel('Velocity')
+        ax.set_ylabel(f'Velocity ({velocity_unit})')
         ax.set_title('By Sex')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -389,7 +445,7 @@ class FoodEncounterAnalyzer:
         
         ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
         ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel('Velocity')
+        ax.set_ylabel(f'Velocity ({velocity_unit})')
         ax.set_title('By Strain/Genotype')
         ax.legend()
         ax.grid(True, alpha=0.3)
@@ -435,9 +491,17 @@ class FoodEncounterAnalyzer:
                     bars = ax.bar(x_pos, means, yerr=errors, capsize=5, alpha=0.7)
                     ax.set_xticks(x_pos)
                     ax.set_xticklabels(labels, rotation=45, ha='right')
-                    ax.set_ylabel('Velocity (mean ± SEM)')
+                    ax.set_ylabel(f'Velocity ({velocity_unit}) (mean ± SEM)')
                     ax.set_title(title)
                     ax.grid(True, alpha=0.3, axis='y')
+                    
+                    # Add N values as text on bars
+                    n_animals = stats_data[valid_idx][f'{window}_n_animals'].values
+                    for i, (bar, n) in enumerate(zip(bars, n_animals)):
+                        if not pd.isna(n):
+                            height = bar.get_height()
+                            ax.text(bar.get_x() + bar.get_width()/2., height + errors[i],
+                                   f'n={int(n)}', ha='center', va='bottom', fontsize=8)
                     
                     # Color bars by treatment
                     treatments = stats_data[valid_idx]['treatment'].values
@@ -516,6 +580,10 @@ class AnalysisApp:
         self.smooth_var = tk.StringVar(value="1.0")
         ttk.Entry(params_frame, textvariable=self.smooth_var, width=10).grid(row=2, column=1, sticky="w", padx=5)
         
+        ttk.Label(params_frame, text="Pixels per mm:").grid(row=3, column=0, sticky="w")
+        self.pixels_per_mm_var = tk.StringVar(value="104.0")
+        ttk.Entry(params_frame, textvariable=self.pixels_per_mm_var, width=10).grid(row=3, column=1, sticky="w", padx=5)
+        
         # Action buttons
         button_frame = ttk.Frame(main_frame)
         button_frame.grid(row=3, column=0, columnspan=2, pady=20)
@@ -578,14 +646,18 @@ class AnalysisApp:
             # Clear log
             self.log_text.delete(1.0, "end")
             
-            # Load data
-            if not self.analyzer.load_data(csv_file):
-                return
-            
             # Get parameters
             time_before = float(self.time_before_var.get())
             time_after = float(self.time_after_var.get())
             smooth_window = float(self.smooth_var.get())
+            pixels_per_mm = float(self.pixels_per_mm_var.get())
+            
+            # Update analyzer with new pixels_per_mm
+            self.analyzer.pixels_per_mm = pixels_per_mm
+            
+            # Load data
+            if not self.analyzer.load_data(csv_file):
+                return
             
             # Run analysis
             self.analyzer.calculate_velocities(smooth_window)
@@ -605,7 +677,9 @@ class AnalysisApp:
             return
         
         try:
-            self.analyzer.plot_velocity_profiles(save_plots=True)
+            # Check if show_individual_var exists (GUI fully initialized)
+            show_individual = getattr(self, 'show_individual_var', tk.BooleanVar(value=False)).get()
+            self.analyzer.plot_velocity_profiles(save_plots=True, show_individual_traces=show_individual)
         except Exception as e:
             messagebox.showerror("Error", f"Plot generation failed: {e}")
     
