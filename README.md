@@ -19,7 +19,7 @@ cd SWT_worm_tracker
 
 
 ## REQUIRED DEPENDENCIES
-## Run following commands inside SWT_worm_tracker root directory
+### Run following commands inside SWT_worm_tracker root directory
 
 ## Windows 10/11 Powershell
 ```bash
