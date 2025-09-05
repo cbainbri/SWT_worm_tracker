@@ -200,7 +200,7 @@ class AutoMaskNoseApp:
             self.progress_var.set("SAM not installed (optional).")
             return
         try:
-            script_dir = Path(__file__).parent
+            script_dir = Path(__file__).resolve().parent
             seg_dir = script_dir / "segmentation"
             # Prefer the smaller/faster B model if multiple are present
             preferred = [
@@ -269,7 +269,7 @@ class AutoMaskNoseApp:
         def load_model():
             self.progress_queue.put("PROGRESS_START")
             path = filedialog.askopenfilename(title="Select SAM checkpoint (*.pth)",
-                                              initialdir=str((Path(__file__).parent / "segmentation").resolve()),
+                                              initialdir=str((Path(__file__).resolve().parent / "segmentation").resolve()),
                                               filetypes=[("PyTorch checkpoint", "*.pth"), ("All files", "*.*")])
             if not path:
                 self.progress_queue.put("PROGRESS_STOP")
