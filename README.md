@@ -97,7 +97,7 @@ chmod +x *.py
 
 
 # General workflow: 
-## tracking.py -> track_editor.py ->track_mask.py
+## tracking.py or batch_tracking.py -> track_editor.py ->track_mask.py
 
 This workflow is designed for separated image files for tracking analysis. Each independent script outputs sequentially modified csv files (saved back to selected input directories) which include worm ID, x,y centroid positions,nose positions, and masking logic to determine when an animal encounters food borders (or other geometric space in the environment).
 
