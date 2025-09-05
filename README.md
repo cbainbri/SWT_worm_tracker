@@ -64,6 +64,12 @@ If you need GPU acceleration (CUDA or ROCm), uninstall torch and reinstall the a
 # RUNNING SCRIPTS
 ## Run following commands inside SWT_worm_tracker root directory
 
+### for MacOS and Linux  
+```bash
+cd SWT_worm_tracker 
+chmod +x *.py
+```
+
 ### Tracking GUI
 ```bash
 python tracking.py
