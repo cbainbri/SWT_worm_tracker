@@ -84,6 +84,7 @@ python automatic_mask.py
 ### Manual mask creation
 ```bash
 python manual_mask.py
+```
 
 ### Or for MacOS and Linux - make executable 
 ```bash
@@ -93,7 +94,7 @@ chmod +x *.py
 #then you can just run ./<script of choice>.py or make .desktop/.app launcher
 ```
 
-```
+
 
 # General workflow: 
 ## tracking.py -> track_editor.py ->track_mask.py
