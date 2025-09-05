@@ -30,7 +30,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
 ```
-#  MacOS
+##  MacOS
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
 brew install python git git-lfs tcl-tk
@@ -43,7 +43,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
 ```
-# Linux
+## Linux
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-tk git git-lfs libgl1
