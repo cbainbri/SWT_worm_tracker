@@ -64,11 +64,6 @@ If you need GPU acceleration (CUDA or ROCm), uninstall torch and reinstall the a
 # RUNNING SCRIPTS
 ## Run following commands inside SWT_worm_tracker root directory
 
-### for MacOS and Linux - make executable first time
-```bash
-cd SWT_worm_tracker 
-chmod +x *.py
-```
 
 ### Tracking GUI
 ```bash
@@ -89,6 +84,15 @@ python automatic_mask.py
 ### Manual mask creation
 ```bash
 python manual_mask.py
+
+### Or for MacOS and Linux - make executable 
+```bash
+cd SWT_worm_tracker 
+chmod +x *.py
+
+#then you can just run ./<script of choice>.py or make .desktop/.app launcher
+```
+
 ```
 
 # General workflow: 
