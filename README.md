@@ -13,19 +13,19 @@ This toolkit requires Python 3.9–3.12 (recommended: 3.11 for best compatibilit
 
 ## 1. git install
 
-####Windows
+#### Windows
 ```bash
 #Download git here 
 https://git-scm.com/downloads/win
 #or Powershell
 winget install Git.Git
 ```
-####MacOS
+#### MacOS
 ```bash
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
 brew install git
 ```
-####Linux
+#### Linux
 ```bash
 #package manager specific
 sudo apt install git 
