@@ -8,32 +8,49 @@ This repository contains Python tools for worm tracking, mask generation (manual
 ---
 
 ## Installation
-#This toolkit requires Python 3.9–3.12 (recommended: 3.11 for best compatibility).
 
-### 1. Clone the Repository 
+This toolkit requires Python 3.9–3.12 (recommended: 3.11 for best compatibility), git, and git-lfs for managing SWT_worm_tracker and SAM model file.
+
+## 1. git install
+
+####Windows
+```bash
+#Download git here 
+https://git-scm.com/downloads/win
+#or Powershell
+winget install Git.Git
+```
+####MacOS
+```bash
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
+brew install git
+```
+####Linux
+```bash
+#package manager specific
+sudo apt install git 
+```
+
+## 2. Clone the Repository 
 ```bash
 git clone https://github.com/cbainbri/SWT_worm_tracker.git
 cd SWT_worm_tracker
 ```
+## 3. Installing required dependencies
 
-
-
-## REQUIRED DEPENDENCIES
 ### Run following commands inside SWT_worm_tracker root directory
 
-## Windows 10/11 Powershell
+### Windows 10/11 Powershell
 ```bash
-winget install Git.Git
 winget install GitHub.GitLFS
 git lfs install
 pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
 ```
-##  MacOS
+###  MacOS
 ```bash
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"   #installs homebrew if not already installed
-brew install python git git-lfs tcl-tk
+brew install python git-lfs tcl-tk
 # IF using conda to manage environments
 conda create -n wormtracker python=3.11
 conda activate wormtracker
@@ -46,7 +63,7 @@ git lfs pull
 ## Linux
 ```bash
 sudo apt update
-sudo apt install -y python3 python3-venv python3-pip python3-tk git git-lfs libgl1
+sudo apt install -y python3 python3-venv python3-pip python3-tk git-lfs libgl1   #python3-tk necessary for tkinter packaged separately on linux
 # IF using conda to manage environments
 conda create -n wormtracker python=3.11
 conda activate wormtracker
