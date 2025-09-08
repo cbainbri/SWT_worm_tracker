@@ -38,9 +38,9 @@ cd SWT_worm_tracker
 ```
 ## 3. Installing required dependencies
 
-### Run following commands inside SWT_worm_tracker root directory
+Run following commands inside SWT_worm_tracker root directory
 
-### Windows 10/11 Powershell
+#### Windows 10/11 Powershell
 ```bash
 winget install GitHub.GitLFS
 git lfs install
@@ -48,7 +48,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
 ```
-###  MacOS
+####  MacOS
 ```bash
 brew install python git-lfs tcl-tk
 # IF using conda to manage environments
@@ -60,7 +60,7 @@ pip install --upgrade pip
 pip install -r requirements.txt
 git lfs pull
 ```
-## Linux
+#### Linux
 ```bash
 sudo apt update
 sudo apt install -y python3 python3-venv python3-pip python3-tk git-lfs libgl1   #python3-tk necessary for tkinter packaged separately on linux
