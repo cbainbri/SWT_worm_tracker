@@ -1,18 +1,17 @@
-
-
-
 #!/usr/bin/env python3
 """
 CSV/TXT Organizer UI (Wide → Long) with sequential metadata dialogs and smart re-import.
 
-What’s new in this version
+What's new in this version
 - Column order: `source_file` is now the FIRST column in the composite.
-- The last columns are coordinates/flags in this exact order: `x`, `y`, `centroid_on_food`, `food_encounter`.
+- The last columns are coordinates/flags in this exact order: `x`, `y`, `centroid_on_food`, `nose_on_food`, `food_encounter`.
 - Supports both older wide format (x,y,flag) and NEW wide format from the masking pipeline that emits
-  per-worm `*_x`, `*_y`, `*_centroid_on_food` (centroid vs mask) and `*__food_encounter` (nose vs mask).
+  per-worm `*_x`, `*_y`, `*_centroid_on_food` (centroid vs mask) and `*__nose_on_food` (nose vs mask).
 - Gracefully handles composite/long CSVs produced by this script: reorders columns and assigns
   `assay_num` for the current import batch (does not break if long files are added).
 - Remembers last-entered metadata per session and pre-fills dialogs.
+- `nose_on_food`: binary flag for when nose is on food (previously called food_encounter)
+- `food_encounter`: marks "food" only at the FIRST transition when nose hits food
 
 Output columns (final order):
   1) source_file
@@ -24,7 +23,7 @@ Output columns (final order):
   7) treatment
   8) time
   9...) (any extra columns carried through, if present)
-  last-3) x, y, centroid_on_food, food_encounter
+  last-4) x, y, centroid_on_food, nose_on_food, food_encounter
 
 Run: python csv_analysis_ui.py
 Requires: Python 3.9+, pandas
@@ -88,7 +87,7 @@ def read_table(path: Path) -> pd.DataFrame:
 # ------------------------------
 LONG_REQUIRED = {'time'}
 LONG_ANY_COORD = {'x', 'y'}
-LONG_ANY_FLAGS = {'food_encounter', 'centroid_on_food'}
+LONG_ANY_FLAGS = {'nose_on_food', 'centroid_on_food', 'food_encounter'}
 
 def is_long_format(df: pd.DataFrame) -> bool:
     cols = {c.strip().lower() for c in df.columns}
@@ -98,7 +97,7 @@ def is_long_format(df: pd.DataFrame) -> bool:
 def enforce_column_order(df: pd.DataFrame) -> pd.DataFrame:
     # Desired final order
     first = ['source_file', 'assay_num', 'track_num', 'pc_number', 'sex', 'strain_genotype', 'treatment', 'time']
-    last = ['x', 'y', 'centroid_on_food', 'food_encounter']
+    last = ['x', 'y', 'centroid_on_food', 'nose_on_food', 'food_encounter']
     existing = list(df.columns)
 
     out = []
@@ -119,6 +118,44 @@ def enforce_column_order(df: pd.DataFrame) -> pd.DataFrame:
     return df[out]
 
 # ------------------------------
+# Function to create food_encounter column from nose_on_food
+# ------------------------------
+def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates food_encounter column that marks 'food' only at the first transition
+    from 0 to 1 in nose_on_food for each track.
+    """
+    if 'nose_on_food' not in df.columns:
+        df['food_encounter'] = ''
+        return df
+    
+    df = df.copy()
+    df['food_encounter'] = ''
+    
+    # Group by track to handle each worm separately
+    if 'track_num' in df.columns:
+        for track_id in df['track_num'].unique():
+            mask = df['track_num'] == track_id
+            track_data = df.loc[mask, 'nose_on_food'].reset_index(drop=True)
+            
+            # Find first transition from 0 to 1
+            transitions = (track_data.diff() == 1) & (track_data == 1)
+            if transitions.any():
+                first_encounter_idx = transitions.idxmax()
+                # Get the original index in the full dataframe
+                original_idx = df.loc[mask].iloc[first_encounter_idx].name
+                df.loc[original_idx, 'food_encounter'] = 'food'
+    else:
+        # If no track_num, treat entire dataset as one track
+        nose_data = df['nose_on_food'].reset_index(drop=True)
+        transitions = (nose_data.diff() == 1) & (nose_data == 1)
+        if transitions.any():
+            first_encounter_idx = transitions.idxmax()
+            df.iloc[first_encounter_idx, df.columns.get_loc('food_encounter')] = 'food'
+    
+    return df
+
+# ------------------------------
 # Column detection / parsing for wide format
 # ------------------------------
 _TIME_CANDIDATES = ['time', 'frame', 't', 'frames']
@@ -135,7 +172,7 @@ def detect_time_column(df: pd.DataFrame) -> str:
 _CENTROID_FLAG_PAT = re.compile(r'centroid[_ ]?on[_ ]?food', re.I)
 _X_PAT = re.compile(r'(?:^|[^a-z])(x|xpos|x_coord|xcoordinate|xposition)\b', re.I)
 _Y_PAT = re.compile(r'(?:^|[^a-z])(y|ypos|y_coord|ycoordinate|yposition)\b', re.I)
-_FLAG_PAT = re.compile(r'(?:flag|food|enc|onfood|food_encounter|on_food|flag\d*)', re.I)
+_FLAG_PAT = re.compile(r'(?:flag|food|enc|onfood|nose_on_food|on_food|flag\d*)', re.I)
 
 def extract_id_token(colname: str) -> Optional[str]:
     m = re.search(r'(\d+)\s*$', colname)
@@ -200,6 +237,10 @@ def parse_wide_file_to_long(path: Path,
 
     # If the file is already long format, just standardize/order columns and override assay_num
     if is_long_format(df):
+        # Handle legacy food_encounter column (rename to nose_on_food if needed)
+        if 'food_encounter' in df.columns and 'nose_on_food' not in df.columns:
+            df = df.rename(columns={'food_encounter': 'nose_on_food'})
+        
         # Ensure required columns exist / fill if missing
         for col in ['source_file', 'track_num', 'pc_number', 'sex', 'strain_genotype', 'treatment']:
             if col not in df.columns:
@@ -210,7 +251,16 @@ def parse_wide_file_to_long(path: Path,
                     df[col] = 1
                 else:
                     df[col] = ''
+        
+        # Ensure nose_on_food exists
+        if 'nose_on_food' not in df.columns:
+            df['nose_on_food'] = 0
+            
         df['assay_num'] = assay_num
+        
+        # Create the new food_encounter column
+        df = create_food_encounter_column(df)
+        
         # Order columns and return
         df = enforce_column_order(df)
         return df
@@ -270,9 +320,9 @@ def parse_wide_file_to_long(path: Path,
             centroid_flag = pd.Series(0, index=df.index)
 
         if flagcol and flagcol in df.columns:
-            food_flag = normalize_flag_series(df[flagcol])
+            nose_flag = normalize_flag_series(df[flagcol])
         else:
-            food_flag = pd.Series(0, index=df.index)
+            nose_flag = pd.Series(0, index=df.index)
 
         part = pd.DataFrame({
             'source_file': path.name,
@@ -286,10 +336,14 @@ def parse_wide_file_to_long(path: Path,
             'x': x,
             'y': y,
             'centroid_on_food': centroid_flag,
-            'food_encounter': food_flag,
+            'nose_on_food': nose_flag,
         })
         # Drop rows with NaN time
         part = part[~part['time'].isna()].reset_index(drop=True)
+        
+        # Create food_encounter column for this track
+        part = create_food_encounter_column(part)
+        
         # Enforce final order now
         part = enforce_column_order(part)
         rows.append(part)
@@ -391,7 +445,8 @@ class App(tk.Tk):
         desc = ttk.Label(frm, text=(
             "Reads all .csv/.txt files from a directory (default: ./analyze),\n"
             "asks for metadata per file (sequential, prefilled), and saves a composite long-format CSV.\n"
-            "Supports new wide files with centroid_on_food and food_encounter, and re-import of long CSVs."
+            "Supports new wide files with centroid_on_food and nose_on_food, and re-import of long CSVs.\n"
+            "Creates food_encounter column marking only the FIRST nose-food contact per track."
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
 
@@ -486,7 +541,8 @@ class App(tk.Tk):
         frm = self.cont_tab
         desc = ttk.Label(frm, text=(
             "Open an existing composite CSV, select a new data directory, and append new assays.\n"
-            "Assay numbering continues from the last assay_num (supports re-import of long CSVs)."
+            "Assay numbering continues from the last assay_num (supports re-import of long CSVs).\n"
+            "Handles legacy food_encounter columns and creates new food_encounter logic."
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
 
@@ -541,6 +597,27 @@ class App(tk.Tk):
             messagebox.showerror("Error", f"Failed to read composite:\n{e}")
             return
 
+        # Handle legacy composite files - rename old food_encounter to nose_on_food if needed
+        if 'food_encounter' in composite.columns and 'nose_on_food' not in composite.columns:
+            # Check if food_encounter contains binary values (legacy nose_on_food data)
+            unique_vals = set(composite['food_encounter'].dropna().astype(str).str.lower())
+            if unique_vals.issubset({'0', '1', '0.0', '1.0', 'true', 'false', 'nan'}):
+                composite = composite.rename(columns={'food_encounter': 'nose_on_food'})
+                composite['nose_on_food'] = normalize_flag_series(composite['nose_on_food'])
+                self._log_cont("Renamed legacy food_encounter column to nose_on_food")
+        
+        # Ensure nose_on_food exists
+        if 'nose_on_food' not in composite.columns:
+            composite['nose_on_food'] = 0
+            
+        # Create new food_encounter column if it doesn't exist or is the old binary format
+        if 'food_encounter' not in composite.columns:
+            composite = create_food_encounter_column(composite)
+            self._log_cont("Created new food_encounter column marking first nose-food contacts")
+        
+        # Reorder columns
+        composite = enforce_column_order(composite)
+
         if 'assay_num' not in composite.columns:
             messagebox.showerror("Error", "Composite missing 'assay_num' column.")
             return
@@ -550,54 +627,54 @@ class App(tk.Tk):
 
         data_dir = Path(self.cont_data_dir_var.get().strip())
         if not data_dir.exists() or not data_dir.is_dir():
-            messagebox.showerror("Error", f"New data directory does not exist:\n{data_dir}")
-            return
+           messagebox.showerror("Error", f"New data directory does not exist:\n{data_dir}")
+           return
 
         files = sorted([p for p in data_dir.iterdir() if p.suffix.lower() in ('.csv', '.txt')])
         if not files:
-            messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
-            return
+           messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
+           return
 
         new_rows: List[pd.DataFrame] = []
         assay_num = next_assay
 
         for path in files:
-            md = FileMetaWizard(self, path.name, defaults=self.last_meta)
-            # sequential behavior
-            self.wait_window(md)
-            if md.result is None:
-                self._log_cont(f"Skipping {path.name} (cancelled by user).")
-                continue
-            # update defaults for next file
-            self.last_meta = md.result.copy()
-            try:
-                part = parse_wide_file_to_long(
-                    path=path,
-                    assay_num=assay_num,
-                    pc_number=md.result['pc_number'],
-                    sex=md.result['sex'],
-                    strain_genotype=md.result['strain_genotype'],
-                    treatment=md.result['treatment'],
-                )
-                new_rows.append(part)
-                self._log_cont(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
-                assay_num += 1
-            except Exception as e:
-                self._log_cont(f"ERROR parsing {path.name}: {e}")
+           md = FileMetaWizard(self, path.name, defaults=self.last_meta)
+           # sequential behavior
+           self.wait_window(md)
+           if md.result is None:
+               self._log_cont(f"Skipping {path.name} (cancelled by user).")
+               continue
+           # update defaults for next file
+           self.last_meta = md.result.copy()
+           try:
+               part = parse_wide_file_to_long(
+                   path=path,
+                   assay_num=assay_num,
+                   pc_number=md.result['pc_number'],
+                   sex=md.result['sex'],
+                   strain_genotype=md.result['strain_genotype'],
+                   treatment=md.result['treatment'],
+               )
+               new_rows.append(part)
+               self._log_cont(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
+               assay_num += 1
+           except Exception as e:
+               self._log_cont(f"ERROR parsing {path.name}: {e}")
 
         if not new_rows:
-            messagebox.showwarning("Nothing appended", "No new data imported.")
-            return
+           messagebox.showwarning("Nothing appended", "No new data imported.")
+           return
 
         updated = pd.concat([composite] + new_rows, ignore_index=True)
         try:
-            updated = enforce_column_order(updated)
-            save_path = Path(self.cont_save_var.get().strip())
-            updated.to_csv(save_path, index=False)
-            self._log_cont(f"Saved updated composite to: {save_path}")
-            messagebox.showinfo("Done", f"Updated composite saved to:\n{save_path}")
+           updated = enforce_column_order(updated)
+           save_path = Path(self.cont_save_var.get().strip())
+           updated.to_csv(save_path, index=False)
+           self._log_cont(f"Saved updated composite to: {save_path}")
+           messagebox.showinfo("Done", f"Updated composite saved to:\n{save_path}")
         except Exception as e:
-            messagebox.showerror("Save error", f"Failed to save updated composite:\n{e}")
+           messagebox.showerror("Save error", f"Failed to save updated composite:\n{e}")
 
     def _log_cont(self, msg: str):
         self.cont_log.insert("end", msg + "\n")
@@ -605,9 +682,8 @@ class App(tk.Tk):
         self.cont_log.update_idletasks()
 
 def main():
-    app = App()
-    app.mainloop()
+   app = App()
+   app.mainloop()
 
 if __name__ == "__main__":
-    main()
-
+   main()
