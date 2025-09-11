@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CSV/TXT Organizer UI (Wide → Long) with sequential metadata dialogs and smart re-import.
+CSV/TXT Organizer UI (Wide → Long) with sequential metadata dialogs, smart re-import, and filename inference.
 
 What's new in this version
 - Column order: `source_file` is now the FIRST column in the composite.
@@ -12,6 +12,8 @@ What's new in this version
 - Remembers last-entered metadata per session and pre-fills dialogs.
 - `nose_on_food`: binary flag for when nose is on food (previously called food_encounter)
 - `food_encounter`: marks "food" only at the FIRST transition when nose hits food
+- NEW: Filename inference mode - automatically parse metadata from standardized filenames
+  Format: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)
 
 Output columns (final order):
   1) source_file
@@ -32,7 +34,7 @@ Requires: Python 3.9+, pandas
 import re
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 import tkinter as tk
@@ -62,6 +64,89 @@ def _infer_delimiter(path: Path) -> str:
         if c > best_count:
             best, best_count = d, c
     return best
+
+# ------------------------------
+# Filename parsing utilities
+# ------------------------------
+def normalize_date(date_str: str) -> str:
+    """Normalize various date formats to a consistent format."""
+    # Remove any extra characters and normalize separators
+    date_str = re.sub(r'[^\d\.\-\/]', '', date_str)
+    # Convert - or / to .
+    date_str = re.sub(r'[\-\/]', '.', date_str)
+    return date_str
+
+def normalize_sex(sex_str: str) -> str:
+    """Normalize sex field to standard lowercase format."""
+    sex_lower = sex_str.lower().strip()
+    sex_mapping = {
+        'm': 'm', 'male': 'm',
+        'f': 'f', 'female': 'f', 
+        'h': 'h', 'hermaphrodite': 'h', 'herm': 'h'
+    }
+    return sex_mapping.get(sex_lower, sex_lower)
+
+def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
+    """
+    Parse metadata from filename with format: PC1_5.28.2025_m_wt_3hr#
+    Expected format: PC#_date_sex_strain_treatment#
+    
+    Returns dict with keys: pc_number, date, sex, strain_genotype, treatment
+    Returns None if parsing fails.
+    """
+    # Remove file extension
+    basename = Path(filename).stem
+    
+    # Support both _ and - as delimiters
+    parts = re.split(r'[_\-]', basename)
+    
+    if len(parts) < 5:
+        return None
+    
+    try:
+        # Extract components
+        pc_part = parts[0].strip()
+        date_part = parts[1].strip()
+        sex_part = parts[2].strip()
+        strain_part = parts[3].strip()
+        treatment_part = parts[4].strip()
+        
+        # Validate PC number format
+        if not re.match(r'^PC\d+$', pc_part, re.IGNORECASE):
+            return None
+        
+        # Normalize components
+        pc_number = pc_part.upper()  # Keep PC uppercase
+        date = normalize_date(date_part)
+        sex = normalize_sex(sex_part)
+        strain_genotype = strain_part.lower()
+        # Remove trailing # from treatment and normalize
+        treatment = re.sub(r'#*$', '', treatment_part).lower()
+        
+        return {
+            'pc_number': pc_number,
+            'date': date,
+            'sex': sex,
+            'strain_genotype': strain_genotype,
+            'treatment': treatment
+        }
+        
+    except Exception:
+        return None
+
+def validate_parsed_metadata(metadata: Dict[str, str]) -> Tuple[bool, str]:
+    """Validate parsed metadata. Returns (is_valid, error_message)."""
+    if not metadata['pc_number']:
+        return False, "PC number is required"
+    
+    if not re.match(r'^PC\d+$', metadata['pc_number'], re.IGNORECASE):
+        return False, "PC number must be in format PC# (e.g., PC1)"
+    
+    valid_sex = {'m', 'f', 'h', 'male', 'female', 'hermaphrodite'}
+    if metadata['sex'].lower() not in valid_sex:
+        return False, f"Sex must be one of: {', '.join(valid_sex)}"
+    
+    return True, ""
 
 # ------------------------------
 # Robust file reading
@@ -355,6 +440,165 @@ def parse_wide_file_to_long(path: Path,
 # ------------------------------
 # UI components
 # ------------------------------
+class InputModeDialog(tk.Toplevel):
+    """Dialog to choose between manual input and filename inference."""
+    def __init__(self, master):
+        super().__init__(master)
+        self.title("Select Input Mode")
+        self.resizable(False, False)
+        self.result = None
+
+        frm = ttk.Frame(self, padding=15)
+        frm.grid(row=0, column=0, sticky="nsew")
+
+        ttk.Label(frm, text="Choose how to enter experimental metadata:", 
+                  font=('TkDefaultFont', 10, 'bold')).grid(row=0, column=0, columnspan=2, pady=(0,15))
+
+        # Manual mode
+        manual_frame = ttk.LabelFrame(frm, text="Manual Input", padding=10)
+        manual_frame.grid(row=1, column=0, padx=(0,10), pady=5, sticky="nsew")
+        
+        ttk.Label(manual_frame, text="Enter metadata for each file\nthrough dialog boxes").grid(row=0, column=0, pady=5)
+        ttk.Button(manual_frame, text="Use Manual Input", 
+                   command=lambda: self._set_result('manual')).grid(row=1, column=0, pady=5)
+
+        # Filename inference mode
+        inference_frame = ttk.LabelFrame(frm, text="Filename Inference", padding=10)
+        inference_frame.grid(row=1, column=1, padx=(10,0), pady=5, sticky="nsew")
+        
+        ttk.Label(inference_frame, text="Parse metadata from filenames\n\nExpected format:").grid(row=0, column=0, pady=2)
+        ttk.Label(inference_frame, text="PC1_5.28.2025_m_wt_3hr#", 
+                  font=('TkDefaultFont', 9, 'bold'), foreground='blue').grid(row=1, column=0, pady=2)
+        ttk.Label(inference_frame, text="(PC#_date_sex_strain_treatment#)", 
+                  font=('TkDefaultFont', 8), foreground='gray').grid(row=2, column=0, pady=2)
+        ttk.Button(inference_frame, text="Use Filename Inference", 
+                   command=lambda: self._set_result('inference')).grid(row=3, column=0, pady=5)
+
+        # Cancel button
+        ttk.Button(frm, text="Cancel", command=self._cancel).grid(row=2, column=0, columnspan=2, pady=(15,0))
+
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+        self.wait_visibility()
+        self.focus_set()
+
+    def _set_result(self, mode):
+        self.result = mode
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
+class FilenamePreviewDialog(tk.Toplevel):
+    """Dialog to preview and confirm parsed metadata from filenames."""
+    def __init__(self, master, parsed_data: List[Tuple[Path, Dict[str, str]]]):
+        super().__init__(master)
+        self.title("Preview Parsed Metadata")
+        self.geometry("800x500")
+        self.result = None
+        self.parsed_data = parsed_data
+
+        frm = ttk.Frame(self, padding=10)
+        frm.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+
+        ttk.Label(frm, text="Preview of parsed metadata (click rows to edit):", 
+                  font=('TkDefaultFont', 10, 'bold')).grid(row=0, column=0, sticky="w", pady=(0,10))
+
+        # Create treeview for preview
+        columns = ('filename', 'pc_number', 'sex', 'strain_genotype', 'treatment', 'date')
+        self.tree = ttk.Treeview(frm, columns=columns, show='headings', height=15)
+        
+        # Define headings
+        self.tree.heading('filename', text='Filename')
+        self.tree.heading('pc_number', text='PC Number')
+        self.tree.heading('sex', text='Sex')
+        self.tree.heading('strain_genotype', text='Strain/Genotype')
+        self.tree.heading('treatment', text='Treatment')
+        self.tree.heading('date', text='Date')
+
+        # Set column widths
+        self.tree.column('filename', width=150)
+        self.tree.column('pc_number', width=80)
+        self.tree.column('sex', width=60)
+        self.tree.column('strain_genotype', width=120)
+        self.tree.column('treatment', width=100)
+        self.tree.column('date', width=100)
+
+        self.tree.grid(row=1, column=0, sticky="nsew", pady=(0,10))
+        frm.rowconfigure(1, weight=1)
+        frm.columnconfigure(0, weight=1)
+
+        # Add scrollbar
+        scrollbar = ttk.Scrollbar(frm, orient="vertical", command=self.tree.yview)
+        scrollbar.grid(row=1, column=1, sticky="ns")
+        self.tree.configure(yscrollcommand=scrollbar.set)
+
+        # Populate tree
+        for i, (path, metadata) in enumerate(parsed_data):
+            self.tree.insert('', 'end', iid=i, values=(
+                path.name,
+                metadata['pc_number'],
+                metadata['sex'],
+                metadata['strain_genotype'],
+                metadata['treatment'],
+                metadata['date']
+            ))
+
+        # Bind double-click for editing
+        self.tree.bind('<Double-1>', self._edit_item)
+
+        # Buttons
+        btn_frame = ttk.Frame(frm)
+        btn_frame.grid(row=2, column=0, columnspan=2, pady=10)
+        
+        ttk.Button(btn_frame, text="Edit Selected", command=self._edit_selected).grid(row=0, column=0, padx=5)
+        ttk.Button(btn_frame, text="Cancel", command=self._cancel).grid(row=0, column=1, padx=5)
+        ttk.Button(btn_frame, text="Proceed", command=self._proceed).grid(row=0, column=2, padx=5)
+
+        self.grab_set()
+        self.protocol("WM_DELETE_WINDOW", self._cancel)
+
+    def _edit_item(self, event):
+        selection = self.tree.selection()
+        if selection:
+            self._edit_selected()
+
+    def _edit_selected(self):
+        selection = self.tree.selection()
+        if not selection:
+            messagebox.showwarning("No Selection", "Please select a row to edit.")
+            return
+        
+        item_id = int(selection[0])
+        path, metadata = self.parsed_data[item_id]
+        
+        # Open edit dialog
+        edit_dialog = FileMetaWizard(self, path.name, defaults=metadata)
+        self.wait_window(edit_dialog)
+        
+        if edit_dialog.result:
+            # Update the stored metadata and tree display
+            self.parsed_data[item_id] = (path, edit_dialog.result)
+            self.tree.item(selection[0], values=(
+                path.name,
+                edit_dialog.result['pc_number'],
+                edit_dialog.result['sex'],
+                edit_dialog.result['strain_genotype'],
+                edit_dialog.result['treatment'],
+                edit_dialog.result.get('date', metadata.get('date', ''))
+            ))
+
+    def _proceed(self):
+        self.result = self.parsed_data
+        self.destroy()
+
+    def _cancel(self):
+        self.result = None
+        self.destroy()
+
 class FileMetaWizard(tk.Toplevel):
     """Modal dialog to collect metadata for a single file (prefills with last values)."""
     def __init__(self, master, fname: str, defaults: Optional[dict] = None):
@@ -435,18 +679,95 @@ class App(tk.Tk):
         self.cont_tab = ttk.Frame(nb, padding=10)
         nb.add(self.new_tab, text="New Analysis")
         nb.add(self.cont_tab, text="Continue Analysis")
-
         self._build_new_tab()
         self._build_continue_tab()
+
+    def _get_input_mode(self) -> Optional[str]:
+        """Show dialog to choose input mode. Returns 'manual', 'inference', or None."""
+        mode_dialog = InputModeDialog(self)
+        self.wait_window(mode_dialog)
+        return mode_dialog.result
+
+    def _process_files_with_inference(self, files: List[Path]) -> Optional[List[Tuple[Path, Dict[str, str]]]]:
+        """
+        Process files using filename inference.
+        Returns list of (path, metadata) tuples or None if cancelled.
+        """
+        parsed_data = []
+        failed_files = []
+
+        for path in files:
+            metadata = parse_filename_metadata(path.name)
+            if metadata is None:
+                failed_files.append(path.name)
+                continue
+            
+            # Validate parsed metadata
+            is_valid, error_msg = validate_parsed_metadata(metadata)
+            if not is_valid:
+                failed_files.append(f"{path.name}: {error_msg}")
+                continue
+                
+            parsed_data.append((path, metadata))
+
+        # Show any failed files
+        if failed_files:
+            failed_msg = "The following files could not be parsed:\n\n" + "\n".join(failed_files)
+            failed_msg += "\n\nExpected format: PC1_5.28.2025_m_wt_3hr#"
+            messagebox.showwarning("Parsing Failures", failed_msg)
+            
+            if not parsed_data:
+                return None
+
+        # Show preview dialog
+        if parsed_data:
+            preview_dialog = FilenamePreviewDialog(self, parsed_data)
+            self.wait_window(preview_dialog)
+            return preview_dialog.result
+        
+        return None
+
+    def _process_files_manual(self, files: List[Path]) -> Optional[List[Tuple[Path, Dict[str, str]]]]:
+        """
+        Process files using manual input dialogs.
+        Returns list of (path, metadata) tuples or None if cancelled.
+        """
+        manual_data = []
+        
+        for path in files:
+            md = FileMetaWizard(self, path.name, defaults=self.last_meta)
+            self.wait_window(md)
+            if md.result is None:
+                # User cancelled, ask if they want to skip this file or abort
+                response = messagebox.askyesnocancel(
+                    "File Skipped", 
+                    f"Skip {path.name} and continue with remaining files?\n\n"
+                    "Yes = Skip this file\n"
+                    "No = Abort entire process\n"
+                    "Cancel = Go back to enter metadata"
+                )
+                if response is True:  # Skip this file
+                    continue
+                elif response is False:  # Abort
+                    return None
+                else:  # Cancel - go back (this shouldn't happen with our dialog)
+                    continue
+            
+            # Update defaults for next file
+            self.last_meta = md.result.copy()
+            manual_data.append((path, md.result))
+            
+        return manual_data if manual_data else None
 
     # -------- New Analysis Tab --------
     def _build_new_tab(self):
         frm = self.new_tab
         desc = ttk.Label(frm, text=(
             "Reads all .csv/.txt files from a directory (default: ./analyze),\n"
-            "asks for metadata per file (sequential, prefilled), and saves a composite long-format CSV.\n"
+            "asks for metadata per file (manual or filename inference), and saves a composite long-format CSV.\n"
             "Supports new wide files with centroid_on_food and nose_on_food, and re-import of long CSVs.\n"
-            "Creates food_encounter column marking only the FIRST nose-food contact per track."
+            "Creates food_encounter column marking only the FIRST nose-food contact per track.\n"
+            "Filename format for inference: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)"
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
 
@@ -491,26 +812,34 @@ class App(tk.Tk):
             messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
             return
 
+        # Get input mode
+        input_mode = self._get_input_mode()
+        if input_mode is None:
+            return
+
+        # Process files based on mode
+        if input_mode == 'inference':
+            file_data = self._process_files_with_inference(files)
+        else:  # manual
+            file_data = self._process_files_manual(files)
+
+        if not file_data:
+            self._log_new("Import cancelled or no valid files processed.")
+            return
+
+        # Process the files
         composite_rows: List[pd.DataFrame] = []
         assay_num = 1
 
-        for path in files:
-            md = FileMetaWizard(self, path.name, defaults=self.last_meta)
-            # sequential behavior
-            self.wait_window(md)
-            if md.result is None:
-                self._log_new(f"Skipping {path.name} (cancelled by user).")
-                continue
-            # update defaults for next file
-            self.last_meta = md.result.copy()
+        for path, metadata in file_data:
             try:
                 part = parse_wide_file_to_long(
                     path=path,
                     assay_num=assay_num,
-                    pc_number=md.result['pc_number'],
-                    sex=md.result['sex'],
-                    strain_genotype=md.result['strain_genotype'],
-                    treatment=md.result['treatment'],
+                    pc_number=metadata['pc_number'],
+                    sex=metadata['sex'],
+                    strain_genotype=metadata['strain_genotype'],
+                    treatment=metadata['treatment'],
                 )
                 composite_rows.append(part)
                 self._log_new(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
@@ -542,7 +871,8 @@ class App(tk.Tk):
         desc = ttk.Label(frm, text=(
             "Open an existing composite CSV, select a new data directory, and append new assays.\n"
             "Assay numbering continues from the last assay_num (supports re-import of long CSVs).\n"
-            "Handles legacy food_encounter columns and creates new food_encounter logic."
+            "Handles legacy food_encounter columns and creates new food_encounter logic.\n"
+            "Supports both manual input and filename inference for new files."
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
 
@@ -635,26 +965,34 @@ class App(tk.Tk):
            messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
            return
 
+        # Get input mode
+        input_mode = self._get_input_mode()
+        if input_mode is None:
+            return
+
+        # Process files based on mode
+        if input_mode == 'inference':
+            file_data = self._process_files_with_inference(files)
+        else:  # manual
+            file_data = self._process_files_manual(files)
+
+        if not file_data:
+            self._log_cont("Import cancelled or no valid files processed.")
+            return
+
+        # Process the files
         new_rows: List[pd.DataFrame] = []
         assay_num = next_assay
 
-        for path in files:
-           md = FileMetaWizard(self, path.name, defaults=self.last_meta)
-           # sequential behavior
-           self.wait_window(md)
-           if md.result is None:
-               self._log_cont(f"Skipping {path.name} (cancelled by user).")
-               continue
-           # update defaults for next file
-           self.last_meta = md.result.copy()
+        for path, metadata in file_data:
            try:
                part = parse_wide_file_to_long(
                    path=path,
                    assay_num=assay_num,
-                   pc_number=md.result['pc_number'],
-                   sex=md.result['sex'],
-                   strain_genotype=md.result['strain_genotype'],
-                   treatment=md.result['treatment'],
+                   pc_number=metadata['pc_number'],
+                   sex=metadata['sex'],
+                   strain_genotype=metadata['strain_genotype'],
+                   treatment=metadata['treatment'],
                )
                new_rows.append(part)
                self._log_cont(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
