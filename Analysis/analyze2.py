@@ -10,12 +10,15 @@ New Features:
 - Food Encounter context: on_food_velocity / nearby_food_velocity ratios  
 - Statistical analysis with mixed-effects models, transformations, and diagnostics
 - Proper handling of unpaired (detection) vs paired (encounter) experimental designs
+- Complete separation by sex - no cross-sex grouping in analysis or visualization
+- Option for sex-separated or combined plotting
+- Flexible food behavior detection using only food_encounter column as primary source
 
 - Creates unique animal IDs from assay_num + track_num
 - Calculates velocity from centroid positions (x, y coordinates)
 - Aligns food encounters to time=0 for comparison
 - Provides statistical summaries for different time windows
-- Groups analysis by treatment, sex, and strain/genotype
+- Groups analysis by treatment, sex, and strain/genotype with strict separation
 
 Requirements: pandas, numpy, matplotlib, seaborn, scipy, statsmodels
 """
@@ -74,23 +77,33 @@ class FoodEncounterAnalyzer:
             # Validate required columns for merge script output
             required_cols = ['assay_num', 'track_num', 'time', 'x', 'y', 
                            'treatment', 'sex', 'strain_genotype']
-            optional_cols = ['food_encounter', 'nose_on_food', 'centroid_on_food', 
-                           'pc_number', 'source_file']
             
             missing = [col for col in required_cols if col not in self.data.columns]
             if missing:
                 print(f"ERROR: Missing required columns: {missing}")
                 return False
             
-            # Create missing optional columns if needed
+            # Check for food_encounter column (primary source of truth)
+            if 'food_encounter' not in self.data.columns:
+                print("ERROR: food_encounter column required (should be created by merge_files.py)")
+                print("Available columns:", list(self.data.columns))
+                return False
+            
+            # Create optional columns if missing (for compatibility, not analysis dependency)
+            optional_cols = ['nose_on_food', 'centroid_on_food', 'pc_number', 'source_file']
+            contextual_cols_missing = []
+            
             for col in optional_cols:
                 if col not in self.data.columns:
-                    if col == 'food_encounter':
-                        self.data[col] = ''
-                    elif col in ['nose_on_food', 'centroid_on_food']:
-                        self.data[col] = 0
+                    if col in ['nose_on_food', 'centroid_on_food']:
+                        self.data[col] = 0  # Keep for compatibility but don't rely on
+                        contextual_cols_missing.append(col)
                     else:
                         self.data[col] = ''
+            
+            if contextual_cols_missing:
+                print(f"INFO: Optional columns {contextual_cols_missing} created with default values.")
+                print("Analysis will use food_encounter column as primary source for behavioral context.")
                         
             # Create unique animal IDs (compatible with merge script output)
             if 'animal_id' not in self.data.columns:
@@ -98,6 +111,8 @@ class FoodEncounterAnalyzer:
             
             print(f"Unique animals: {self.data['animal_id'].nunique()}")
             print(f"Treatments: {sorted(self.data['treatment'].unique())}")
+            print(f"Sexes: {sorted(self.data['sex'].unique())}")
+            print(f"Strains: {sorted(self.data['strain_genotype'].unique())}")
             print(f"Animals with food encounters: {self.data[self.data['food_encounter'] == 'food']['animal_id'].nunique()}")
             
             return True
@@ -156,12 +171,12 @@ class FoodEncounterAnalyzer:
         print(f"Mean velocity: {self.velocity_data['velocity'].mean():.3f} ± {self.velocity_data['velocity'].std():.3f}")
     
     def extract_contextual_velocities(self) -> Dict[str, pd.DataFrame]:
-        """Extract velocities for different behavioral contexts"""
+        """Extract velocities for different behavioral contexts using food_encounter column as primary source"""
         if self.velocity_data is None:
             print("ERROR: No velocity data available")
             return {}
             
-        print("Extracting contextual velocities...")
+        print("Extracting contextual velocities using food_encounter column...")
         
         contexts = {}
         
@@ -173,36 +188,66 @@ class FoodEncounterAnalyzer:
         food_assay_mask = ~self.velocity_data['treatment'].str.endswith('_off', na=False)
         food_data = self.velocity_data[food_assay_mask].copy()
         
+        nearby_food_data = []
+        on_food_data = []
+        
         if len(food_data) > 0:
-            # Nearby food velocities (nose_on_food=0 AND centroid_on_food=0)
-            nearby_mask = (food_data['nose_on_food'] == 0) & (food_data['centroid_on_food'] == 0)
-            contexts['nearby_food'] = food_data[nearby_mask].copy()
+            # For each animal, use food_encounter timing to classify behavior
+            for animal_id in food_data['animal_id'].unique():
+                animal_data = food_data[food_data['animal_id'] == animal_id].sort_values('time').copy()
+                
+                # Find first food encounter event
+                food_encounters = animal_data[animal_data['food_encounter'] == 'food']
+                
+                if len(food_encounters) > 0:
+                    # Get the time of first food encounter
+                    encounter_time = food_encounters.iloc[0]['time']
+                    
+                    # Before encounter = nearby food
+                    nearby_mask = animal_data['time'] < encounter_time
+                    nearby_food_data.append(animal_data[nearby_mask])
+                    
+                    # At and after encounter = on food
+                    on_food_mask = animal_data['time'] >= encounter_time
+                    on_food_data.append(animal_data[on_food_mask])
+                else:
+                    # No food encounter found = all data is nearby food
+                    nearby_food_data.append(animal_data)
             
-            # On food velocities (nose_on_food=1)
-            on_food_mask = (food_data['nose_on_food'] == 1)
-            contexts['on_food'] = food_data[on_food_mask].copy()
+            # Combine data from all animals
+            if nearby_food_data:
+                contexts['nearby_food'] = pd.concat(nearby_food_data, ignore_index=True)
+            else:
+                contexts['nearby_food'] = pd.DataFrame()
+                
+            if on_food_data:
+                contexts['on_food'] = pd.concat(on_food_data, ignore_index=True)
+            else:
+                contexts['on_food'] = pd.DataFrame()
         else:
             contexts['nearby_food'] = pd.DataFrame()
             contexts['on_food'] = pd.DataFrame()
         
         self.contextual_velocities = contexts
         
-        # Print summary
+        # Print summary by sex
         for context, data in contexts.items():
             if len(data) > 0:
-                print(f"{context}: {len(data)} data points, {data['animal_id'].nunique()} animals, "
-                      f"mean velocity = {data['velocity'].mean():.3f}")
+                print(f"{context}: {len(data)} data points, {data['animal_id'].nunique()} animals")
+                for sex in data['sex'].unique():
+                    sex_data = data[data['sex'] == sex]
+                    print(f"  {sex}: {sex_data['animal_id'].nunique()} animals, mean velocity = {sex_data['velocity'].mean():.3f}")
             else:
                 print(f"{context}: No data")
                 
         return contexts
     
     def calculate_behavioral_ratios(self) -> pd.DataFrame:
-        """Calculate food detection and food encounter ratios per animal"""
+        """Calculate food detection and food encounter ratios per animal with complete sex separation"""
         if self.contextual_velocities is None:
             self.extract_contextual_velocities()
             
-        print("Calculating behavioral ratios...")
+        print("Calculating behavioral ratios with complete sex separation...")
         
         ratios_data = []
         
@@ -263,6 +308,13 @@ class FoodEncounterAnalyzer:
         print(f"Animals with food detection data: {self.behavioral_ratios['has_detection_data'].sum()}")
         print(f"Animals with food encounter data: {self.behavioral_ratios['has_encounter_data'].sum()}")
         
+        # Print breakdown by sex
+        for sex in self.behavioral_ratios['sex'].unique():
+            sex_data = self.behavioral_ratios[self.behavioral_ratios['sex'] == sex]
+            print(f"Sex {sex}: {len(sex_data)} animals, "
+                  f"detection data: {sex_data['has_detection_data'].sum()}, "
+                  f"encounter data: {sex_data['has_encounter_data'].sum()}")
+        
         return self.behavioral_ratios
     
     def _get_mean_velocity(self, animal_id: str, context: str) -> float:
@@ -279,29 +331,35 @@ class FoodEncounterAnalyzer:
         return animal_data['velocity'].mean()
     
     def perform_statistical_analysis(self, transformation: str = 'auto') -> Dict[str, any]:
-        """Perform comprehensive statistical analysis of behavioral ratios"""
+        """Perform comprehensive statistical analysis of behavioral ratios with complete sex separation"""
         if self.behavioral_ratios is None:
             self.calculate_behavioral_ratios()
             
-        print("Performing statistical analysis...")
+        print("Performing statistical analysis with complete sex separation...")
         
         results = {}
         
-        # Analyze food detection ratios (unpaired design)
-        detection_data = self.behavioral_ratios[self.behavioral_ratios['has_detection_data']].copy()
-        if len(detection_data) > 0:
-            results['food_detection'] = self._analyze_context(
-                detection_data, 'food_detection_ratio', 'Food Detection', 
-                transformation, paired=False
-            )
-        
-        # Analyze food encounter ratios (paired design)
-        encounter_data = self.behavioral_ratios[self.behavioral_ratios['has_encounter_data']].copy()
-        if len(encounter_data) > 0:
-            results['food_encounter'] = self._analyze_context(
-                encounter_data, 'food_encounter_ratio', 'Food Encounter',
-                transformation, paired=True
-            )
+        # Analyze each sex separately for both detection and encounter ratios
+        for sex in self.behavioral_ratios['sex'].unique():
+            sex_data = self.behavioral_ratios[self.behavioral_ratios['sex'] == sex]
+            results[f'{sex}_detection'] = {}
+            results[f'{sex}_encounter'] = {}
+            
+            # Food detection ratios for this sex
+            detection_data = sex_data[sex_data['has_detection_data']].copy()
+            if len(detection_data) > 0:
+                results[f'{sex}_detection'] = self._analyze_context(
+                    detection_data, 'food_detection_ratio', f'{sex} Food Detection', 
+                    transformation, paired=False
+                )
+            
+            # Food encounter ratios for this sex
+            encounter_data = sex_data[sex_data['has_encounter_data']].copy()
+            if len(encounter_data) > 0:
+                results[f'{sex}_encounter'] = self._analyze_context(
+                    encounter_data, 'food_encounter_ratio', f'{sex} Food Encounter',
+                    transformation, paired=True
+                )
         
         self.statistical_results = results
         return results
@@ -344,8 +402,8 @@ class FoodEncounterAnalyzer:
         result['normality_tests'] = self._test_normality(y, y_transformed, context_name)
         
         # Choose analysis based on data distribution and design
-        if len(set(data['treatment'])) > 1 or len(set(data['sex'])) > 1:
-            # Multi-factor analysis
+        if len(set(data['treatment'])) > 1 or len(set(data['strain_genotype'])) > 1:
+            # Multi-factor analysis (within this sex only)
             result['statistical_tests'] = self._perform_multifactor_analysis(
                 result['transformed_data'], f'{response_col}_transformed', paired
             )
@@ -447,12 +505,12 @@ class FoodEncounterAnalyzer:
     
     def _perform_multifactor_analysis(self, data: pd.DataFrame, response_col: str, 
                                     paired: bool) -> Dict[str, any]:
-        """Perform multi-factor statistical analysis"""
+        """Perform multi-factor statistical analysis within sex"""
         
         results = {}
         
         # Clean data
-        clean_data = data.dropna(subset=[response_col, 'treatment', 'sex', 'strain_genotype'])
+        clean_data = data.dropna(subset=[response_col, 'treatment', 'strain_genotype'])
         
         if len(clean_data) < 5:
             return {'error': 'insufficient_data'}
@@ -460,14 +518,14 @@ class FoodEncounterAnalyzer:
         # Mixed-effects model (if statsmodels available)
         if HAS_STATSMODELS:
             try:
-                # Create formula for mixed-effects model
+                # Create formula for mixed-effects model within sex
                 if paired:
                     # For paired design, include animal as random effect
-                    formula = f"{response_col} ~ treatment + sex + strain_genotype + treatment:sex"
+                    formula = f"{response_col} ~ treatment + strain_genotype + treatment:strain_genotype"
                     model = mixedlm(formula, clean_data, groups=clean_data['animal_id'])
                 else:
                     # For unpaired design, include assay as random effect
-                    formula = f"{response_col} ~ treatment + sex + strain_genotype + treatment:sex"
+                    formula = f"{response_col} ~ treatment + strain_genotype + treatment:strain_genotype"
                     model = mixedlm(formula, clean_data, groups=clean_data['assay_num'])
                 
                 fitted_model = model.fit()
@@ -488,14 +546,14 @@ class FoodEncounterAnalyzer:
         try:
             from scipy.stats import f_oneway
             
-            # Group by treatment
+            # Group by treatment*strain combination
             groups = []
             group_names = []
-            for treatment in clean_data['treatment'].unique():
-                group_data = clean_data[clean_data['treatment'] == treatment][response_col]
-                if len(group_data) > 0:
-                    groups.append(group_data)
-                    group_names.append(treatment)
+            for (treatment, strain), group_data in clean_data.groupby(['treatment', 'strain_genotype']):
+                response_data = group_data[response_col]
+                if len(response_data) > 0:
+                    groups.append(response_data)
+                    group_names.append(f"{treatment}_{strain}")
             
             if len(groups) > 1:
                 f_stat, p_value = f_oneway(*groups)
@@ -571,12 +629,12 @@ class FoodEncounterAnalyzer:
             print("WARNING: No food encounter data could be aligned")
     
     def calculate_summary_statistics(self) -> pd.DataFrame:
-        """Calculate summary statistics for different time windows - maintains existing functionality"""
+        """Calculate summary statistics for different time windows with complete sex separation"""
         if self.encounter_aligned_data is None:
             print("ERROR: No aligned data available")
             return None
             
-        print("Calculating summary statistics...")
+        print("Calculating summary statistics with complete sex separation...")
         
         # Define time windows
         time_windows = {
@@ -588,16 +646,16 @@ class FoodEncounterAnalyzer:
         
         summary_data = []
         
-        # Group by treatment, sex, strain/genotype
-        groups = ['treatment', 'sex', 'strain_genotype']
+        # Group by sex, treatment, strain/genotype - complete separation
+        groups = ['sex', 'treatment', 'strain_genotype']
         
         for group_vals, group_data in self.encounter_aligned_data.groupby(groups):
-            treatment, sex, strain = group_vals
+            sex, treatment, strain = group_vals
             
             # Calculate statistics for each time window
             row = {
+                'sex': sex,
                 'treatment': treatment,
-                'sex': sex, 
                 'strain_genotype': strain,
                 'n_animals': group_data['animal_id'].nunique()
             }
@@ -633,7 +691,7 @@ class FoodEncounterAnalyzer:
         return self.summary_stats
     
     def print_behavioral_analysis_report(self) -> None:
-        """Print comprehensive behavioral analysis report"""
+        """Print comprehensive behavioral analysis report with complete sex separation"""
         if self.behavioral_ratios is None:
             print("No behavioral ratio data available")
             return
@@ -650,33 +708,37 @@ class FoodEncounterAnalyzer:
         print(f"Total animals analyzed: {total_animals}")
         print(f"Animals with food detection data: {detection_animals}")
         print(f"Animals with food encounter data: {encounter_animals}")
+        print("Behavioral contexts determined from food_encounter column timing")
         
         velocity_unit = "mm/s" if self.pixels_per_mm > 0 else "pixels/time"
         print(f"\nVelocity units: {velocity_unit}")
         
-        # Contextual velocity summary
-        print(f"\nContextual Velocity Summary:")
-        print(f"{'Context':<15} {'N Animals':<10} {'Mean Velocity':<15} {'Std Velocity':<15}")
-        print("-" * 60)
+        # Contextual velocity summary by sex
+        print(f"\nContextual Velocity Summary by Sex:")
+        print(f"{'Sex':<5} {'Context':<15} {'N Animals':<10} {'Mean Velocity':<15} {'Std Velocity':<15}")
+        print("-" * 70)
         
         if self.contextual_velocities:
             for context, data in self.contextual_velocities.items():
                 if len(data) > 0:
-                    mean_vel = data['velocity'].mean()
-                    std_vel = data['velocity'].std()
-                    n_animals = data['animal_id'].nunique()
-                    print(f"{context:<15} {n_animals:<10} {mean_vel:<15.3f} {std_vel:<15.3f}")
+                    for sex in sorted(data['sex'].unique()):
+                        sex_data = data[data['sex'] == sex]
+                        mean_vel = sex_data['velocity'].mean()
+                        std_vel = sex_data['velocity'].std()
+                        n_animals = sex_data['animal_id'].nunique()
+                        print(f"{sex:<5} {context:<15} {n_animals:<10} {mean_vel:<15.3f} {std_vel:<15.3f}")
         
-        # Behavioral ratios by group
-        print(f"\nBehavioral Ratios by Group:")
+        # Behavioral ratios by complete factor combination (no grouping across sexes)
+        print(f"\nBehavioral Ratios by Sex + Strain + Treatment:")
+        print("-" * 80)
+        print(f"{'Sex':<5} {'Strain':<12} {'Treatment':<15} {'N':<4} {'Detection Ratio':<20} {'Encounter Ratio':<20}")
         print("-" * 80)
         
-        groups = ['treatment', 'sex', 'strain_genotype']
+        # Group by all three factors simultaneously - no hierarchical grouping
+        groups = ['sex', 'strain_genotype', 'treatment']
         for group_vals, group_data in self.behavioral_ratios.groupby(groups):
-            treatment, sex, strain = group_vals
-            
-            print(f"\nGroup: {treatment} | {sex} | {strain}")
-            print(f"Animals (n): {len(group_data)}")
+            sex, strain, treatment = group_vals
+            n_animals = len(group_data)
             
             # Food detection ratios
             detection_data = group_data[group_data['has_detection_data']]
@@ -684,9 +746,9 @@ class FoodEncounterAnalyzer:
                 det_mean = detection_data['food_detection_ratio'].mean()
                 det_std = detection_data['food_detection_ratio'].std()
                 det_sem = det_std / np.sqrt(len(detection_data))
-                print(f"Food Detection Ratio: {det_mean:.3f} ± {det_std:.3f} (SEM: {det_sem:.3f}) [n={len(detection_data)}]")
+                detection_ratio_str = f"{det_mean:.3f} ± {det_std:.3f}"
             else:
-                print("Food Detection Ratio: No data")
+                detection_ratio_str = "No data"
             
             # Food encounter ratios  
             encounter_data = group_data[group_data['has_encounter_data']]
@@ -694,17 +756,22 @@ class FoodEncounterAnalyzer:
                 enc_mean = encounter_data['food_encounter_ratio'].mean()
                 enc_std = encounter_data['food_encounter_ratio'].std()
                 enc_sem = enc_std / np.sqrt(len(encounter_data))
-                print(f"Food Encounter Ratio: {enc_mean:.3f} ± {enc_std:.3f} (SEM: {enc_sem:.3f}) [n={len(encounter_data)}]")
+                encounter_ratio_str = f"{enc_mean:.3f} ± {enc_std:.3f}"
             else:
-                print("Food Encounter Ratio: No data")
+                encounter_ratio_str = "No data"
+            
+            print(f"{sex:<5} {strain:<12} {treatment:<15} {n_animals:<4} {detection_ratio_str:<20} {encounter_ratio_str:<20}")
         
         # Statistical results summary
         if self.statistical_results:
-            print(f"\nStatistical Analysis Summary:")
+            print(f"\nStatistical Analysis Summary by Sex:")
             print("-" * 80)
             
             for context, results in self.statistical_results.items():
-                print(f"\n{context.upper()} CONTEXT:")
+                if not results:  # Skip empty results
+                    continue
+                    
+                print(f"\n{context.upper().replace('_', ' ')} CONTEXT:")
                 
                 if 'mixed_effects' in results:
                     me_results = results['mixed_effects']
@@ -727,7 +794,7 @@ class FoodEncounterAnalyzer:
         print("\n" + "="*80)
     
     def print_summary_report(self) -> None:
-        """Print human-readable summary report - maintains existing functionality"""
+        """Print human-readable summary report with complete sex separation"""
         if self.summary_stats is None:
             print("No summary statistics available")
             return
@@ -742,6 +809,12 @@ class FoodEncounterAnalyzer:
             total_encounters = len(self.encounter_aligned_data[self.encounter_aligned_data['relative_time'].abs() < 0.1])
             print(f"Total animals analyzed: {total_animals}")
             print(f"Total food encounters: {total_encounters}")
+            
+            # Breakdown by sex
+            for sex in sorted(self.encounter_aligned_data['sex'].unique()):
+                sex_data = self.encounter_aligned_data[self.encounter_aligned_data['sex'] == sex]
+                sex_animals = sex_data['animal_id'].nunique()
+                print(f"  Sex {sex}: {sex_animals} animals")
         
         print(f"\nTime Windows:")
         print(f"  Short-term before: -15 to -5 seconds")
@@ -752,10 +825,13 @@ class FoodEncounterAnalyzer:
         velocity_unit = "mm/s" if self.pixels_per_mm > 0 else "pixels/time"
         print(f"\nVelocity units: {velocity_unit}")
         
-        # Group results
+        # Group results with complete separation
+        print(f"\nResults by Sex + Treatment + Strain (Complete Separation):")
+        print("="*80)
+        
         for idx, row in self.summary_stats.iterrows():
             print(f"\n{'-'*60}")
-            print(f"Group: {row['treatment']} | {row['sex']} | {row['strain_genotype']}")
+            print(f"Sex: {row['sex']} | Treatment: {row['treatment']} | Strain: {row['strain_genotype']}")
             print(f"Animals (n): {row['n_animals']}")
             print(f"{'-'*60}")
             
@@ -777,49 +853,69 @@ class FoodEncounterAnalyzer:
         print("\n" + "="*80)
     
     def analyze_food_leaving_behavior(self) -> Optional[pd.DataFrame]:
-        """Analyze velocity patterns when animals leave food areas - maintains existing functionality"""
+        """Analyze velocity patterns when animals leave food areas using food_encounter timing"""
         if self.velocity_data is None:
             print("No velocity data available for food leaving analysis")
             return None
             
-        print("Analyzing food leaving behavior...")
+        print("Analyzing food leaving behavior using food_encounter column...")
         
         leaving_data = []
         
         for animal_id in self.velocity_data['animal_id'].unique():
             animal_data = self.velocity_data[self.velocity_data['animal_id'] == animal_id].sort_values('time').copy()
             
-            # Find transitions from food encounter to no encounter
-            food_shifts = animal_data['nose_on_food'].diff()
-            leaving_times = animal_data[food_shifts == -1]['time'].values
+            # Find food encounter events first
+            food_encounters = animal_data[animal_data['food_encounter'] == 'food']
             
-            for leave_time in leaving_times:
-                # Get data around leaving event
-                window_data = animal_data[
-                    (animal_data['time'] >= leave_time - 60) & 
-                    (animal_data['time'] <= leave_time + 60)
-                ].copy()
+            if len(food_encounters) == 0:
+                continue
                 
-                if len(window_data) > 10:  # Minimum data points
-                    window_data['relative_time'] = window_data['time'] - leave_time
-                    window_data['event_type'] = 'food_leaving'
-                    leaving_data.append(window_data)
+            encounter_time = food_encounters.iloc[0]['time']
+            
+            # Look for transitions after food encounter where animals might be leaving
+            # This is a simplified approach - could be enhanced with more sophisticated leaving detection
+            post_encounter_data = animal_data[animal_data['time'] > encounter_time]
+            
+            if len(post_encounter_data) > 60:  # At least 1 minute of post-encounter data
+                # Define potential leaving events as times when velocity increases significantly
+                # after being on food (this is a heuristic and could be improved)
+                velocities = post_encounter_data['velocity'].rolling(window=10, center=True).mean()
+                velocity_changes = velocities.diff()
+                
+                # Find potential leaving times (large velocity increases)
+                potential_leaves = post_encounter_data[velocity_changes > velocity_changes.quantile(0.8)]
+                
+                for _, leave_event in potential_leaves.head(3).iterrows():  # Max 3 leaving events per animal
+                    leave_time = leave_event['time']
+                    
+                    # Get data around leaving event
+                    window_data = animal_data[
+                        (animal_data['time'] >= leave_time - 60) & 
+                        (animal_data['time'] <= leave_time + 60)
+                    ].copy()
+                    
+                    if len(window_data) > 10:  # Minimum data points
+                        window_data['relative_time'] = window_data['time'] - leave_time
+                        window_data['event_type'] = 'food_leaving'
+                        leaving_data.append(window_data)
         
         if leaving_data:
             result = pd.concat(leaving_data, ignore_index=True)
-            print(f"Found {len(leaving_data)} food leaving events")
+            print(f"Found {len(leaving_data)} potential food leaving events")
             return result
         else:
-            print("No food leaving events found")
+            print("No food leaving events detected")
             return None
     
-    def plot_behavioral_ratios(self, save_plots: bool = True, output_dir: str = "plots") -> None:
-        """Create plots for behavioral ratio analysis"""
+    def plot_behavioral_ratios(self, save_plots: bool = True, output_dir: str = "plots", 
+                             separate_by_sex: bool = True) -> None:
+        """Create plots for behavioral ratio analysis with sex separation option"""
         if self.behavioral_ratios is None:
             print("No behavioral ratio data available for plotting")
             return
             
-        print("Creating behavioral ratio plots...")
+        print(f"Creating behavioral ratio plots (separate_by_sex={separate_by_sex})...")
         
         # Create output directory
         if save_plots:
@@ -830,130 +926,243 @@ class FoodEncounterAnalyzer:
         if HAS_SEABORN:
             sns.set_palette("husl")
         
-        # Create figure with subplots
-        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
-        fig.suptitle('Behavioral Context Analysis', fontsize=16)
-        
-        # Plot 1: Food Detection Ratios by Treatment
-        ax = axes[0, 0]
-        detection_data = self.behavioral_ratios[self.behavioral_ratios['has_detection_data']]
-        if len(detection_data) > 0:
-            treatment_groups = detection_data.groupby('treatment')['food_detection_ratio']
-            treatments = list(treatment_groups.groups.keys())
-            ratios = [treatment_groups.get_group(t).values for t in treatments]
+        if separate_by_sex:
+            # Create separate plots for each sex
+            sexes = sorted(self.behavioral_ratios['sex'].unique())
+            n_sexes = len(sexes)
             
-            bp = ax.boxplot(ratios, labels=treatments, patch_artist=True)
-            for patch in bp['boxes']:
-                patch.set_facecolor('lightblue')
-                patch.set_alpha(0.7)
+            # Food Detection Ratios
+            fig, axes = plt.subplots(1, n_sexes, figsize=(8*n_sexes, 6))
+            if n_sexes == 1:
+                axes = [axes]
+            fig.suptitle('Food Detection Ratios by Sex (Separate)', fontsize=16)
             
-            ax.set_title('Food Detection Ratios by Treatment')
+            for i, sex in enumerate(sexes):
+                ax = axes[i]
+                sex_data = self.behavioral_ratios[
+                    (self.behavioral_ratios['sex'] == sex) & 
+                    (self.behavioral_ratios['has_detection_data'])
+                ]
+                
+                if len(sex_data) > 0:
+                    # Create combined treatment+strain labels
+                    sex_data = sex_data.copy()
+                    sex_data['group_label'] = sex_data['strain_genotype'] + '_' + sex_data['treatment']
+                    
+                    group_labels = sex_data['group_label'].unique()
+                    ratios = [sex_data[sex_data['group_label'] == label]['food_detection_ratio'].values 
+                             for label in group_labels]
+                    
+                    bp = ax.boxplot(ratios, labels=group_labels, patch_artist=True)
+                    for patch in bp['boxes']:
+                        patch.set_facecolor('lightblue')
+                        patch.set_alpha(0.7)
+                
+                ax.set_title(f'Sex: {sex}')
+                ax.set_ylabel('Nearby Food / Off Food Velocity')
+                ax.tick_params(axis='x', rotation=45)
+                ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            if save_plots:
+                plt.savefig(f"{output_dir}/detection_ratios_by_sex.png", dpi=300, bbox_inches='tight')
+                plt.savefig(f"{output_dir}/detection_ratios_by_sex.pdf", bbox_inches='tight')
+            plt.show()
+            
+            # Food Encounter Ratios
+            fig, axes = plt.subplots(1, n_sexes, figsize=(8*n_sexes, 6))
+            if n_sexes == 1:
+                axes = [axes]
+            fig.suptitle('Food Encounter Ratios by Sex (Separate)', fontsize=16)
+            
+            for i, sex in enumerate(sexes):
+                ax = axes[i]
+                sex_data = self.behavioral_ratios[
+                    (self.behavioral_ratios['sex'] == sex) & 
+                    (self.behavioral_ratios['has_encounter_data'])
+                ]
+                
+                if len(sex_data) > 0:
+                    # Create combined treatment+strain labels
+                    sex_data = sex_data.copy()
+                    sex_data['group_label'] = sex_data['strain_genotype'] + '_' + sex_data['treatment']
+                    
+                    group_labels = sex_data['group_label'].unique()
+                    ratios = [sex_data[sex_data['group_label'] == label]['food_encounter_ratio'].values 
+                             for label in group_labels]
+                    
+                    bp = ax.boxplot(ratios, labels=group_labels, patch_artist=True)
+                    for patch in bp['boxes']:
+                        patch.set_facecolor('lightcoral')
+                        patch.set_alpha(0.7)
+                
+                ax.set_title(f'Sex: {sex}')
+                ax.set_ylabel('On Food / Nearby Food Velocity')
+                ax.tick_params(axis='x', rotation=45)
+                ax.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            if save_plots:
+                plt.savefig(f"{output_dir}/encounter_ratios_by_sex.png", dpi=300, bbox_inches='tight')
+                plt.savefig(f"{output_dir}/encounter_ratios_by_sex.pdf", bbox_inches='tight')
+            plt.show()
+            
+        else:
+            # Combined plot with sex distinction
+            fig, axes = plt.subplots(2, 3, figsize=(18, 12))
+            fig.suptitle('Behavioral Context Analysis (Combined)', fontsize=16)
+            
+            # Plot 1: Food Detection Ratios by Treatment (sex distinguished)
+            ax = axes[0, 0]
+            detection_data = self.behavioral_ratios[self.behavioral_ratios['has_detection_data']]
+            if len(detection_data) > 0:
+                # Create sex+treatment+strain combinations
+                detection_data = detection_data.copy()
+                detection_data['full_label'] = (detection_data['sex'] + '_' + 
+                                              detection_data['strain_genotype'] + '_' + 
+                                              detection_data['treatment'])
+                
+                full_labels = detection_data['full_label'].unique()
+                ratios = [detection_data[detection_data['full_label'] == label]['food_detection_ratio'].values 
+                         for label in full_labels]
+                
+                bp = ax.boxplot(ratios, labels=full_labels, patch_artist=True)
+                
+                # Color by sex
+                sexes = sorted(detection_data['sex'].unique())
+                colors = plt.cm.Set1(np.linspace(0, 1, len(sexes)))
+                sex_colors = {sex: colors[i] for i, sex in enumerate(sexes)}
+                
+                for i, (patch, label) in enumerate(zip(bp['boxes'], full_labels)):
+                    sex = label.split('_')[0]
+                    patch.set_facecolor(sex_colors[sex])
+                    patch.set_alpha(0.7)
+            
+            ax.set_title('Food Detection Ratios (All Groups)')
             ax.set_ylabel('Nearby Food / Off Food Velocity')
             ax.tick_params(axis='x', rotation=45)
             ax.grid(True, alpha=0.3)
-        
-        # Plot 2: Food Encounter Ratios by Treatment
-        ax = axes[0, 1]
-        encounter_data = self.behavioral_ratios[self.behavioral_ratios['has_encounter_data']]
-        if len(encounter_data) > 0:
-            treatment_groups = encounter_data.groupby('treatment')['food_encounter_ratio']
-            treatments = list(treatment_groups.groups.keys())
-            ratios = [treatment_groups.get_group(t).values for t in treatments]
             
-            bp = ax.boxplot(ratios, labels=treatments, patch_artist=True)
-            for patch in bp['boxes']:
-                patch.set_facecolor('lightcoral')
-                patch.set_alpha(0.7)
+            # Plot 2: Food Encounter Ratios by Treatment (sex distinguished)
+            ax = axes[0, 1]
+            encounter_data = self.behavioral_ratios[self.behavioral_ratios['has_encounter_data']]
+            if len(encounter_data) > 0:
+                # Create sex+treatment+strain combinations
+                encounter_data = encounter_data.copy()
+                encounter_data['full_label'] = (encounter_data['sex'] + '_' + 
+                                              encounter_data['strain_genotype'] + '_' + 
+                                              encounter_data['treatment'])
+                
+                full_labels = encounter_data['full_label'].unique()
+                ratios = [encounter_data[encounter_data['full_label'] == label]['food_encounter_ratio'].values 
+                         for label in full_labels]
+                
+                bp = ax.boxplot(ratios, labels=full_labels, patch_artist=True)
+                
+                # Color by sex
+                for i, (patch, label) in enumerate(zip(bp['boxes'], full_labels)):
+                    sex = label.split('_')[0]
+                    patch.set_facecolor(sex_colors[sex])
+                    patch.set_alpha(0.7)
             
-            ax.set_title('Food Encounter Ratios by Treatment')
+            ax.set_title('Food Encounter Ratios (All Groups)')
             ax.set_ylabel('On Food / Nearby Food Velocity')
             ax.tick_params(axis='x', rotation=45)
             ax.grid(True, alpha=0.3)
-        
-        # Plot 3: Food Detection Ratios by Sex
-        ax = axes[0, 2]
-        if len(detection_data) > 0:
-            sex_groups = detection_data.groupby('sex')['food_detection_ratio']
-            sexes = list(sex_groups.groups.keys())
-            ratios = [sex_groups.get_group(s).values for s in sexes]
             
-            bp = ax.boxplot(ratios, labels=sexes, patch_artist=True)
-            colors = ['lightpink', 'lightblue', 'lightgreen']
-            for patch, color in zip(bp['boxes'], colors):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.7)
+            # Plot 3: Detection Ratios by Sex (grouped)
+            ax = axes[0, 2]
+            if len(detection_data) > 0:
+                sex_groups = detection_data.groupby('sex')['food_detection_ratio']
+                sexes = list(sex_groups.groups.keys())
+                ratios = [sex_groups.get_group(s).values for s in sexes]
+                
+                bp = ax.boxplot(ratios, labels=sexes, patch_artist=True)
+                for i, (patch, sex) in enumerate(zip(bp['boxes'], sexes)):
+                    patch.set_facecolor(sex_colors[sex])
+                    patch.set_alpha(0.7)
             
-            ax.set_title('Food Detection Ratios by Sex')
+            ax.set_title('Food Detection by Sex')
             ax.set_ylabel('Nearby Food / Off Food Velocity')
             ax.grid(True, alpha=0.3)
-        
-        # Plot 4: Food Encounter Ratios by Sex
-        ax = axes[1, 0]
-        if len(encounter_data) > 0:
-            sex_groups = encounter_data.groupby('sex')['food_encounter_ratio']
-            sexes = list(sex_groups.groups.keys())
-            ratios = [sex_groups.get_group(s).values for s in sexes]
             
-            bp = ax.boxplot(ratios, labels=sexes, patch_artist=True)
-            colors = ['lightpink', 'lightblue', 'lightgreen']
-            for patch, color in zip(bp['boxes'], colors):
-                patch.set_facecolor(color)
-                patch.set_alpha(0.7)
+            # Plot 4: Encounter Ratios by Sex (grouped)
+            ax = axes[1, 0]
+            if len(encounter_data) > 0:
+                sex_groups = encounter_data.groupby('sex')['food_encounter_ratio']
+                sexes = list(sex_groups.groups.keys())
+                ratios = [sex_groups.get_group(s).values for s in sexes]
+                
+                bp = ax.boxplot(ratios, labels=sexes, patch_artist=True)
+                for i, (patch, sex) in enumerate(zip(bp['boxes'], sexes)):
+                    patch.set_facecolor(sex_colors[sex])
+                    patch.set_alpha(0.7)
             
-            ax.set_title('Food Encounter Ratios by Sex')
+            ax.set_title('Food Encounter by Sex')
             ax.set_ylabel('On Food / Nearby Food Velocity')
             ax.grid(True, alpha=0.3)
-        
-        # Plot 5: Correlation between Detection and Encounter Ratios
-        ax = axes[1, 1]
-        correlation_data = self.behavioral_ratios[
-            self.behavioral_ratios['has_detection_data'] & 
-            self.behavioral_ratios['has_encounter_data']
-        ]
-        if len(correlation_data) > 5:
-            x = correlation_data['food_detection_ratio']
-            y = correlation_data['food_encounter_ratio']
             
-            ax.scatter(x, y, alpha=0.6)
+            # Plot 5: Correlation between Detection and Encounter Ratios
+            ax = axes[1, 1]
+            correlation_data = self.behavioral_ratios[
+                self.behavioral_ratios['has_detection_data'] & 
+                self.behavioral_ratios['has_encounter_data']
+            ]
+            if len(correlation_data) > 5:
+                for sex in correlation_data['sex'].unique():
+                    sex_data = correlation_data[correlation_data['sex'] == sex]
+                    x = sex_data['food_detection_ratio']
+                    y = sex_data['food_encounter_ratio']
+                    ax.scatter(x, y, alpha=0.6, label=f'Sex {sex}', 
+                             color=sex_colors[sex])
+                
+                # Calculate overall correlation
+                x_all = correlation_data['food_detection_ratio']
+                y_all = correlation_data['food_encounter_ratio']
+                corr_coef = np.corrcoef(x_all, y_all)[0, 1]
+                ax.set_title(f'Detection vs Encounter Ratios\n(r = {corr_coef:.3f})')
+                ax.set_xlabel('Food Detection Ratio')
+                ax.set_ylabel('Food Encounter Ratio')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
             
-            # Calculate correlation
-            corr_coef = np.corrcoef(x, y)[0, 1]
-            ax.set_title(f'Detection vs Encounter Ratios\n(r = {corr_coef:.3f})')
-            ax.set_xlabel('Food Detection Ratio')
-            ax.set_ylabel('Food Encounter Ratio')
-            ax.grid(True, alpha=0.3)
-        
-        # Plot 6: Raw velocity distributions
-        ax = axes[1, 2]
-        if self.contextual_velocities:
-            for i, (context, data) in enumerate(self.contextual_velocities.items()):
-                if len(data) > 0:
-                    velocities = data['velocity'].dropna()
-                    if len(velocities) > 0:
-                        ax.hist(velocities, bins=30, alpha=0.5, label=context, density=True)
+            # Plot 6: Raw velocity distributions by context and sex
+            ax = axes[1, 2]
+            if self.contextual_velocities:
+                context_colors = {'off_food': 'blue', 'nearby_food': 'orange', 'on_food': 'red'}
+                for context, data in self.contextual_velocities.items():
+                    if len(data) > 0:
+                        for sex in data['sex'].unique():
+                            sex_data = data[data['sex'] == sex]
+                            velocities = sex_data['velocity'].dropna()
+                            if len(velocities) > 0:
+                                ax.hist(velocities, bins=20, alpha=0.3, 
+                                       label=f'{context}_{sex}', 
+                                       color=context_colors.get(context, 'gray'),
+                                       density=True)
+                
+                ax.set_title('Velocity Distributions by Context + Sex')
+                ax.set_xlabel('Velocity (mm/s)' if self.pixels_per_mm > 0 else 'Velocity (pixels/time)')
+                ax.set_ylabel('Density')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
             
-            ax.set_title('Velocity Distributions by Context')
-            ax.set_xlabel('Velocity (mm/s)' if self.pixels_per_mm > 0 else 'Velocity (pixels/time)')
-            ax.set_ylabel('Density')
-            ax.legend()
-            ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save_plots:
-            plt.savefig(f"{output_dir}/behavioral_ratios.png", dpi=300, bbox_inches='tight')
-            plt.savefig(f"{output_dir}/behavioral_ratios.pdf", bbox_inches='tight')
-        
-        plt.show()
+            plt.tight_layout()
+            
+            if save_plots:
+                plt.savefig(f"{output_dir}/behavioral_ratios_combined.png", dpi=300, bbox_inches='tight')
+                plt.savefig(f"{output_dir}/behavioral_ratios_combined.pdf", bbox_inches='tight')
+            
+            plt.show()
     
     def plot_velocity_profiles(self, save_plots: bool = True, output_dir: str = "plots", 
-                             show_individual_traces: bool = False) -> None:
-        """Create velocity profile plots - maintains existing functionality"""
+                             show_individual_traces: bool = False, separate_by_sex: bool = True) -> None:
+        """Create velocity profile plots with sex separation option"""
         if self.encounter_aligned_data is None:
             print("No aligned data available for plotting")
             return
             
-        print("Creating velocity profile plots...")
+        print(f"Creating velocity profile plots (separate_by_sex={separate_by_sex})...")
         
         # Create output directory
         if save_plots:
@@ -964,199 +1173,412 @@ class FoodEncounterAnalyzer:
         if HAS_SEABORN:
             sns.set_palette("husl")
         else:
-            # Use matplotlib color cycle if seaborn not available
             plt.rcParams['axes.prop_cycle'] = plt.cycler(color=['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd', '#8c564b', '#e377c2', '#7f7f7f', '#bcbd22', '#17becf'])
         
         velocity_unit = "mm/s" if self.pixels_per_mm > 0 else "pixels/time"
         
-        # 1. Overall velocity profile plot
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Velocity Profiles Around Food Encounters', fontsize=16)
-        
-        # Group by treatment, sex, strain
-        groups = ['treatment', 'sex', 'strain_genotype']
-        
-        # Plot 1: All groups overlaid
-        ax = axes[0, 0]
-        for group_vals, group_data in self.encounter_aligned_data.groupby(groups):
-            treatment, sex, strain = group_vals
-            label = f"{treatment}_{sex}_{strain}"
+        if separate_by_sex:
+            # Create separate plots for each sex
+            sexes = sorted(self.encounter_aligned_data['sex'].unique())
             
-            # Bin data for smoother curves
-            time_bins = np.arange(-120, 121, 5)
-            binned_velocity = []
-            binned_time = []
-            
-            for i in range(len(time_bins)-1):
-                t_start, t_end = time_bins[i], time_bins[i+1]
-                bin_data = group_data[
-                    (group_data['relative_time'] >= t_start) & 
-                    (group_data['relative_time'] < t_end)
-                ]
-                if len(bin_data) > 0:
-                    binned_velocity.append(bin_data['velocity'].mean())
-                    binned_time.append((t_start + t_end) / 2)
-            
-            if binned_velocity:
-                ax.plot(binned_time, binned_velocity, label=label, alpha=0.7, linewidth=2)
-        
-        ax.axvline(x=0, color='red', linestyle='--', alpha=0.8, label='Food Encounter')
-        ax.axvline(x=-15, color='gray', linestyle=':', alpha=0.5)
-        ax.axvline(x=15, color='gray', linestyle=':', alpha=0.5)
-        ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel(f'Velocity ({velocity_unit})')
-        ax.set_title('All Groups')
-        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 2: By treatment
-        ax = axes[0, 1]
-        for treatment, treat_data in self.encounter_aligned_data.groupby('treatment'):
-            time_bins = np.arange(-120, 121, 5)
-            binned_velocity = []
-            binned_time = []
-            
-            for i in range(len(time_bins)-1):
-                t_start, t_end = time_bins[i], time_bins[i+1]
-                bin_data = treat_data[
-                    (treat_data['relative_time'] >= t_start) & 
-                    (treat_data['relative_time'] < t_end)
-                ]
-                if len(bin_data) > 0:
-                    binned_velocity.append(bin_data['velocity'].mean())
-                    binned_time.append((t_start + t_end) / 2)
-            
-            if binned_velocity:
-                ax.plot(binned_time, binned_velocity, label=treatment, linewidth=2)
-        
-        ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
-        ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel(f'Velocity ({velocity_unit})')
-        ax.set_title('By Treatment')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 3: By sex
-        ax = axes[1, 0]
-        for sex, sex_data in self.encounter_aligned_data.groupby('sex'):
-            time_bins = np.arange(-120, 121, 5)
-            binned_velocity = []
-            binned_time = []
-            
-            for i in range(len(time_bins)-1):
-                t_start, t_end = time_bins[i], time_bins[i+1]
-                bin_data = sex_data[
-                    (sex_data['relative_time'] >= t_start) & 
-                    (sex_data['relative_time'] < t_end)
-                ]
-                if len(bin_data) > 0:
-                    binned_velocity.append(bin_data['velocity'].mean())
-                    binned_time.append((t_start + t_end) / 2)
-            
-            if binned_velocity:
-                ax.plot(binned_time, binned_velocity, label=sex, linewidth=2)
-        
-        ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
-        ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel(f'Velocity ({velocity_unit})')
-        ax.set_title('By Sex')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        # Plot 4: By strain/genotype
-        ax = axes[1, 1]
-        for strain, strain_data in self.encounter_aligned_data.groupby('strain_genotype'):
-            time_bins = np.arange(-120, 121, 5)
-            binned_velocity = []
-            binned_time = []
-            
-            for i in range(len(time_bins)-1):
-                t_start, t_end = time_bins[i], time_bins[i+1]
-                bin_data = strain_data[
-                    (strain_data['relative_time'] >= t_start) & 
-                    (strain_data['relative_time'] < t_end)
-                ]
-                if len(bin_data) > 0:
-                    binned_velocity.append(bin_data['velocity'].mean())
-                    binned_time.append((t_start + t_end) / 2)
-            
-            if binned_velocity:
-                ax.plot(binned_time, binned_velocity, label=strain, linewidth=2)
-        
-        ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
-        ax.set_xlabel('Time Relative to Food Encounter (seconds)')
-        ax.set_ylabel(f'Velocity ({velocity_unit})')
-        ax.set_title('By Strain/Genotype')
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        
-        plt.tight_layout()
-        
-        if save_plots:
-            plt.savefig(f"{output_dir}/velocity_profiles.png", dpi=300, bbox_inches='tight')
-            plt.savefig(f"{output_dir}/velocity_profiles.pdf", bbox_inches='tight')
-        
-        plt.show()
-        
-        # 2. Bar plot of summary statistics
-        if self.summary_stats is not None:
-            fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-            fig.suptitle('Velocity Summary Statistics by Time Windows', fontsize=16)
-            
-            windows = ['short_before', 'short_after', 'long_before', 'long_after']
-            titles = ['Short Before (-15 to -5s)', 'Short After (5 to 15s)', 
-                     'Long Before (-120 to -15s)', 'Long After (15 to 120s)']
-            
-            for i, (window, title) in enumerate(zip(windows, titles)):
-                ax = axes[i//2, i%2]
+            for sex in sexes:
+                sex_data = self.encounter_aligned_data[self.encounter_aligned_data['sex'] == sex]
                 
-                # Create group labels
-                stats_data = self.summary_stats.copy()
-                stats_data['group_label'] = (stats_data['treatment'] + '_' + 
-                                           stats_data['sex'] + '_' + 
-                                           stats_data['strain_genotype'])
+                if len(sex_data) == 0:
+                    continue
                 
-                means = stats_data[f'{window}_mean'].values
-                errors = stats_data[f'{window}_sem'].values
-                labels = stats_data['group_label'].values
+                fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+                fig.suptitle(f'Velocity Profiles Around Food Encounters - Sex: {sex}', fontsize=16)
                 
-                # Remove NaN values
-                valid_idx = ~pd.isna(means)
-                means = means[valid_idx]
-                errors = errors[valid_idx] 
-                labels = labels[valid_idx]
+                # Plot 1: All groups for this sex overlaid
+                ax = axes[0, 0]
+                groups = ['treatment', 'strain_genotype']
                 
-                if len(means) > 0:
-                    x_pos = np.arange(len(labels))
-                    bars = ax.bar(x_pos, means, yerr=errors, capsize=5, alpha=0.7)
-                    ax.set_xticks(x_pos)
-                    ax.set_xticklabels(labels, rotation=45, ha='right')
-                    ax.set_ylabel(f'Velocity ({velocity_unit}) (mean ± SEM)')
-                    ax.set_title(title)
-                    ax.grid(True, alpha=0.3, axis='y')
+                for group_vals, group_data in sex_data.groupby(groups):
+                    treatment, strain = group_vals
+                    label = f"{treatment}_{strain}"
                     
-                    # Add N values as text on bars
-                    n_animals = stats_data[valid_idx]['n_animals'].values
-                    for i, (bar, n) in enumerate(zip(bars, n_animals)):
-                        if not pd.isna(n):
-                            height = bar.get_height()
-                            ax.text(bar.get_x() + bar.get_width()/2., height + errors[i],
-                                   f'n={int(n)}', ha='center', va='bottom', fontsize=8)
+                    # Bin data for smoother curves
+                    time_bins = np.arange(-120, 121, 5)
+                    binned_velocity = []
+                    binned_time = []
                     
-                    # Color bars by treatment
-                    treatments = stats_data[valid_idx]['treatment'].values
-                    colors = plt.cm.Set1(np.linspace(0, 1, len(set(treatments))))
-                    treat_colors = {treat: colors[i] for i, treat in enumerate(set(treatments))}
-                    for bar, treat in zip(bars, treatments):
-                        bar.set_color(treat_colors[treat])
+                    for i in range(len(time_bins)-1):
+                        t_start, t_end = time_bins[i], time_bins[i+1]
+                        bin_data = group_data[
+                            (group_data['relative_time'] >= t_start) & 
+                            (group_data['relative_time'] < t_end)
+                        ]
+                        if len(bin_data) > 0:
+                            binned_velocity.append(bin_data['velocity'].mean())
+                            binned_time.append((t_start + t_end) / 2)
+                    
+                    if binned_velocity:
+                        ax.plot(binned_time, binned_velocity, label=label, alpha=0.7, linewidth=2)
                 
+                ax.axvline(x=0, color='red', linestyle='--', alpha=0.8, label='Food Encounter')
+                ax.axvline(x=-15, color='gray', linestyle=':', alpha=0.5)
+                ax.axvline(x=15, color='gray', linestyle=':', alpha=0.5)
+                ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+                ax.set_ylabel(f'Velocity ({velocity_unit})')
+                ax.set_title('All Groups')
+                ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+                ax.grid(True, alpha=0.3)
+                
+                # Plot 2: By treatment for this sex
+                ax = axes[0, 1]
+                for treatment, treat_data in sex_data.groupby('treatment'):
+                    time_bins = np.arange(-120, 121, 5)
+                    binned_velocity = []
+                    binned_time = []
+                    
+                    for i in range(len(time_bins)-1):
+                        t_start, t_end = time_bins[i], time_bins[i+1]
+                        bin_data = treat_data[
+                            (treat_data['relative_time'] >= t_start) & 
+                            (treat_data['relative_time'] < t_end)
+                        ]
+                        if len(bin_data) > 0:
+                            binned_velocity.append(bin_data['velocity'].mean())
+                            binned_time.append((t_start + t_end) / 2)
+                    
+                    if binned_velocity:
+                        ax.plot(binned_time, binned_velocity, label=treatment, linewidth=2)
+                
+                ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+                ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+                ax.set_ylabel(f'Velocity ({velocity_unit})')
+                ax.set_title('By Treatment')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Plot 3: By strain/genotype for this sex
+                ax = axes[1, 0]
+                for strain, strain_data in sex_data.groupby('strain_genotype'):
+                    time_bins = np.arange(-120, 121, 5)
+                    binned_velocity = []
+                    binned_time = []
+                    
+                    for i in range(len(time_bins)-1):
+                        t_start, t_end = time_bins[i], time_bins[i+1]
+                        bin_data = strain_data[
+                            (strain_data['relative_time'] >= t_start) & 
+                            (strain_data['relative_time'] < t_end)
+                        ]
+                        if len(bin_data) > 0:
+                            binned_velocity.append(bin_data['velocity'].mean())
+                            binned_time.append((t_start + t_end) / 2)
+                    
+                    if binned_velocity:
+                        ax.plot(binned_time, binned_velocity, label=strain, linewidth=2)
+                
+                ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+                ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+                ax.set_ylabel(f'Velocity ({velocity_unit})')
+                ax.set_title('By Strain/Genotype')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                # Plot 4: Treatment x Strain combinations for this sex
+                ax = axes[1, 1]
+                for (treatment, strain), group_data in sex_data.groupby(['treatment', 'strain_genotype']):
+                    time_bins = np.arange(-120, 121, 5)
+                    binned_velocity = []
+                    binned_time = []
+                    
+                    for i in range(len(time_bins)-1):
+                        t_start, t_end = time_bins[i], time_bins[i+1]
+                        bin_data = group_data[
+                            (group_data['relative_time'] >= t_start) & 
+                            (group_data['relative_time'] < t_end)
+                        ]
+                        if len(bin_data) > 0:
+                            binned_velocity.append(bin_data['velocity'].mean())
+                            binned_time.append((t_start + t_end) / 2)
+                    
+                    if binned_velocity:
+                        ax.plot(binned_time, binned_velocity, label=f"{treatment}_{strain}", linewidth=2)
+                
+                ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+                ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+                ax.set_ylabel(f'Velocity ({velocity_unit})')
+                ax.set_title('Treatment x Strain Combinations')
+                ax.legend()
+                ax.grid(True, alpha=0.3)
+                
+                plt.tight_layout()
+                
+                if save_plots:
+                    plt.savefig(f"{output_dir}/velocity_profiles_sex_{sex}.png", dpi=300, bbox_inches='tight')
+                    plt.savefig(f"{output_dir}/velocity_profiles_sex_{sex}.pdf", bbox_inches='tight')
+                
+                plt.show()
+        
+        else:
+            # Combined plot with sex distinguished by color/marker
+            fig, axes = plt.subplots(2, 2, figsize=(15, 12))
+            fig.suptitle('Velocity Profiles Around Food Encounters (All Sexes)', fontsize=16)
+            
+            # Set up sex-based colors
+            sexes = sorted(self.encounter_aligned_data['sex'].unique())
+            sex_colors = dict(zip(sexes, plt.cm.Set1(np.linspace(0, 1, len(sexes)))))
+            
+            # Plot 1: All groups overlaid with sex distinction
+            ax = axes[0, 0]
+            groups = ['sex', 'treatment', 'strain_genotype']
+            
+            for group_vals, group_data in self.encounter_aligned_data.groupby(groups):
+                sex, treatment, strain = group_vals
+                label = f"{sex}_{treatment}_{strain}"
+                
+                # Bin data for smoother curves
+                time_bins = np.arange(-120, 121, 5)
+                binned_velocity = []
+                binned_time = []
+                
+                for i in range(len(time_bins)-1):
+                    t_start, t_end = time_bins[i], time_bins[i+1]
+                    bin_data = group_data[
+                        (group_data['relative_time'] >= t_start) & 
+                        (group_data['relative_time'] < t_end)
+                    ]
+                    if len(bin_data) > 0:
+                        binned_velocity.append(bin_data['velocity'].mean())
+                        binned_time.append((t_start + t_end) / 2)
+                
+                if binned_velocity:
+                    ax.plot(binned_time, binned_velocity, label=label, alpha=0.7, 
+                           linewidth=2, color=sex_colors[sex])
+            
+            ax.axvline(x=0, color='red', linestyle='--', alpha=0.8, label='Food Encounter')
+            ax.axvline(x=-15, color='gray', linestyle=':', alpha=0.5)
+            ax.axvline(x=15, color='gray', linestyle=':', alpha=0.5)
+            ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+            ax.set_ylabel(f'Velocity ({velocity_unit})')
+            ax.set_title('All Groups (Sex Distinguished)')
+            ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+            ax.grid(True, alpha=0.3)
+            
+            # Plot 2: By treatment with sex distinction
+            ax = axes[0, 1]
+            for (sex, treatment), group_data in self.encounter_aligned_data.groupby(['sex', 'treatment']):
+                time_bins = np.arange(-120, 121, 5)
+                binned_velocity = []
+                binned_time = []
+                
+                for i in range(len(time_bins)-1):
+                    t_start, t_end = time_bins[i], time_bins[i+1]
+                    bin_data = group_data[
+                        (group_data['relative_time'] >= t_start) & 
+                        (group_data['relative_time'] < t_end)
+                    ]
+                    if len(bin_data) > 0:
+                        binned_velocity.append(bin_data['velocity'].mean())
+                        binned_time.append((t_start + t_end) / 2)
+                
+                if binned_velocity:
+                    ax.plot(binned_time, binned_velocity, label=f"{sex}_{treatment}", 
+                           linewidth=2, color=sex_colors[sex])
+            
+            ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+            ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+            ax.set_ylabel(f'Velocity ({velocity_unit})')
+            ax.set_title('By Treatment (Sex Distinguished)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Plot 3: By sex only
+            ax = axes[1, 0]
+            for sex, sex_data in self.encounter_aligned_data.groupby('sex'):
+                time_bins = np.arange(-120, 121, 5)
+                binned_velocity = []
+                binned_time = []
+                
+                for i in range(len(time_bins)-1):
+                    t_start, t_end = time_bins[i], time_bins[i+1]
+                    bin_data = sex_data[
+                        (sex_data['relative_time'] >= t_start) & 
+                        (sex_data['relative_time'] < t_end)
+                    ]
+                    if len(bin_data) > 0:
+                        binned_velocity.append(bin_data['velocity'].mean())
+                        binned_time.append((t_start + t_end) / 2)
+                
+                if binned_velocity:
+                    ax.plot(binned_time, binned_velocity, label=sex, linewidth=2, 
+                           color=sex_colors[sex])
+            
+            ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+            ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+            ax.set_ylabel(f'Velocity ({velocity_unit})')
+            ax.set_title('By Sex')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
+            # Plot 4: By strain/genotype with sex distinction
+            ax = axes[1, 1]
+            for (sex, strain), group_data in self.encounter_aligned_data.groupby(['sex', 'strain_genotype']):
+                time_bins = np.arange(-120, 121, 5)
+                binned_velocity = []
+                binned_time = []
+                
+                for i in range(len(time_bins)-1):
+                    t_start, t_end = time_bins[i], time_bins[i+1]
+                    bin_data = group_data[
+                        (group_data['relative_time'] >= t_start) & 
+                        (group_data['relative_time'] < t_end)
+                    ]
+                    if len(bin_data) > 0:
+                        binned_velocity.append(bin_data['velocity'].mean())
+                        binned_time.append((t_start + t_end) / 2)
+                
+                if binned_velocity:
+                    ax.plot(binned_time, binned_velocity, label=f"{sex}_{strain}", 
+                           linewidth=2, color=sex_colors[sex])
+            
+            ax.axvline(x=0, color='red', linestyle='--', alpha=0.8)
+            ax.set_xlabel('Time Relative to Food Encounter (seconds)')
+            ax.set_ylabel(f'Velocity ({velocity_unit})')
+            ax.set_title('By Strain/Genotype (Sex Distinguished)')
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            
             plt.tight_layout()
             
             if save_plots:
-                plt.savefig(f"{output_dir}/summary_statistics.png", dpi=300, bbox_inches='tight')
-                plt.savefig(f"{output_dir}/summary_statistics.pdf", bbox_inches='tight')
+                plt.savefig(f"{output_dir}/velocity_profiles_combined.png", dpi=300, bbox_inches='tight')
+                plt.savefig(f"{output_dir}/velocity_profiles_combined.pdf", bbox_inches='tight')
             
             plt.show()
+        
+        # 2. Bar plot of summary statistics with sex separation
+        if self.summary_stats is not None:
+            if separate_by_sex:
+                # Create separate bar plots for each sex
+                sexes = sorted(self.summary_stats['sex'].unique())
+                
+                for sex in sexes:
+                    sex_stats = self.summary_stats[self.summary_stats['sex'] == sex]
+                    
+                    if len(sex_stats) == 0:
+                        continue
+                    
+                    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+                    fig.suptitle(f'Velocity Summary Statistics by Time Windows - Sex: {sex}', fontsize=16)
+                    
+                    windows = ['short_before', 'short_after', 'long_before', 'long_after']
+                    titles = ['Short Before (-15 to -5s)', 'Short After (5 to 15s)', 
+                             'Long Before (-120 to -15s)', 'Long After (15 to 120s)']
+                    
+                    for i, (window, title) in enumerate(zip(windows, titles)):
+                        ax = axes[i//2, i%2]
+                        
+                        # Create group labels
+                        stats_data = sex_stats.copy()
+                        stats_data['group_label'] = (stats_data['treatment'] + '_' + 
+                                                   stats_data['strain_genotype'])
+                        
+                        means = stats_data[f'{window}_mean'].values
+                        errors = stats_data[f'{window}_sem'].values
+                        labels = stats_data['group_label'].values
+                        
+                        # Remove NaN values
+                        valid_idx = ~pd.isna(means)
+                        means = means[valid_idx]
+                        errors = errors[valid_idx] 
+                        labels = labels[valid_idx]
+                        
+                        if len(means) > 0:
+                            x_pos = np.arange(len(labels))
+                            bars = ax.bar(x_pos, means, yerr=errors, capsize=5, alpha=0.7)
+                            ax.set_xticks(x_pos)
+                            ax.set_xticklabels(labels, rotation=45, ha='right')
+                            ax.set_ylabel(f'Velocity ({velocity_unit}) (mean ± SEM)')
+                            ax.set_title(title)
+                            ax.grid(True, alpha=0.3, axis='y')
+                            
+                            # Add N values as text on bars
+                            n_animals = stats_data[valid_idx]['n_animals'].values
+                            for j, (bar, n) in enumerate(zip(bars, n_animals)):
+                                if not pd.isna(n):
+                                    height = bar.get_height()
+                                    ax.text(bar.get_x() + bar.get_width()/2., height + errors[j],
+                                           f'n={int(n)}', ha='center', va='bottom', fontsize=8)
+                            
+                            # Color bars by treatment
+                            treatments = stats_data[valid_idx]['treatment'].values
+                            colors = plt.cm.Set1(np.linspace(0, 1, len(set(treatments))))
+                            treat_colors = {treat: colors[i] for i, treat in enumerate(set(treatments))}
+                            for bar, treat in zip(bars, treatments):
+                                bar.set_color(treat_colors[treat])
+                    
+                    plt.tight_layout()
+                    
+                    if save_plots:
+                        plt.savefig(f"{output_dir}/summary_statistics_sex_{sex}.png", dpi=300, bbox_inches='tight')
+                        plt.savefig(f"{output_dir}/summary_statistics_sex_{sex}.pdf", bbox_inches='tight')
+                    
+                    plt.show()
+            
+            else:
+                # Combined bar plot with sex distinction
+                fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+                fig.suptitle('Velocity Summary Statistics by Time Windows (All Sexes)', fontsize=16)
+                
+                windows = ['short_before', 'short_after', 'long_before', 'long_after']
+                titles = ['Short Before (-15 to -5s)', 'Short After (5 to 15s)', 
+                         'Long Before (-120 to -15s)', 'Long After (15 to 120s)']
+                
+                for i, (window, title) in enumerate(zip(windows, titles)):
+                    ax = axes[i//2, i%2]
+                    
+                    # Create group labels including sex
+                    stats_data = self.summary_stats.copy()
+                    stats_data['group_label'] = (stats_data['sex'] + '_' + 
+                                               stats_data['treatment'] + '_' + 
+                                               stats_data['strain_genotype'])
+                    
+                    means = stats_data[f'{window}_mean'].values
+                    errors = stats_data[f'{window}_sem'].values
+                    labels = stats_data['group_label'].values
+                    
+                    # Remove NaN values
+                    valid_idx = ~pd.isna(means)
+                    means = means[valid_idx]
+                    errors = errors[valid_idx] 
+                    labels = labels[valid_idx]
+                    
+                    if len(means) > 0:
+                        x_pos = np.arange(len(labels))
+                        bars = ax.bar(x_pos, means, yerr=errors, capsize=5, alpha=0.7)
+                        ax.set_xticks(x_pos)
+                        ax.set_xticklabels(labels, rotation=45, ha='right')
+                        ax.set_ylabel(f'Velocity ({velocity_unit}) (mean ± SEM)')
+                        ax.set_title(title)
+                        ax.grid(True, alpha=0.3, axis='y')
+                        
+                        # Add N values as text on bars
+                        n_animals = stats_data[valid_idx]['n_animals'].values
+                        for j, (bar, n) in enumerate(zip(bars, n_animals)):
+                            if not pd.isna(n):
+                                height = bar.get_height()
+                                ax.text(bar.get_x() + bar.get_width()/2., height + errors[j],
+                                       f'n={int(n)}', ha='center', va='bottom', fontsize=8)
+                        
+                        # Color bars by sex
+                        sexes = stats_data[valid_idx]['sex'].values
+                        sex_colors = dict(zip(sorted(set(sexes)), 
+                                            plt.cm.Set1(np.linspace(0, 1, len(set(sexes))))))
+                        for bar, sex in zip(bars, sexes):
+                            bar.set_color(sex_colors[sex])
+                
+                plt.tight_layout()
+                
+                if save_plots:
+                    plt.savefig(f"{output_dir}/summary_statistics_combined.png", dpi=300, bbox_inches='tight')
+                    plt.savefig(f"{output_dir}/summary_statistics_combined.pdf", bbox_inches='tight')
+                
+                plt.show()
     
     def save_results(self, output_dir: str = "analysis_results") -> None:
         """Save analysis results to CSV files"""
@@ -1230,7 +1652,7 @@ class AnalysisApp:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("Food Encounter Velocity Analysis")
-        self.root.geometry("900x700")
+        self.root.geometry("900x750")
         
         self.analyzer = FoodEncounterAnalyzer()
         self.setup_gui()
@@ -1285,6 +1707,11 @@ class AnalysisApp:
         self.do_stats_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(params_frame, text="Statistical analysis", 
                        variable=self.do_stats_var).grid(row=2, column=2, columnspan=2, sticky="w", padx=(20,0))
+        
+        # Plotting options
+        self.separate_sex_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(params_frame, text="Separate plots by sex", 
+                       variable=self.separate_sex_var).grid(row=3, column=2, columnspan=2, sticky="w", padx=(20,0))
         
         # Action buttons
         button_frame = ttk.Frame(main_frame)
@@ -1397,7 +1824,8 @@ class AnalysisApp:
             return
         
         try:
-            self.analyzer.plot_velocity_profiles(save_plots=True)
+            separate_sex = self.separate_sex_var.get()
+            self.analyzer.plot_velocity_profiles(save_plots=True, separate_by_sex=separate_sex)
         except Exception as e:
             messagebox.showerror("Error", f"Plot generation failed: {e}")
     
@@ -1407,7 +1835,8 @@ class AnalysisApp:
             return
         
         try:
-            self.analyzer.plot_behavioral_ratios(save_plots=True)
+            separate_sex = self.separate_sex_var.get()
+            self.analyzer.plot_behavioral_ratios(save_plots=True, separate_by_sex=separate_sex)
         except Exception as e:
             messagebox.showerror("Error", f"Behavioral plot generation failed: {e}")
     
@@ -1444,8 +1873,15 @@ def main():
     parser.add_argument("--no-stats", action="store_true", help="Skip statistical analysis")
     parser.add_argument("--transformation", choices=["auto", "log", "sqrt", "boxcox", "none"], 
                         default="auto", help="Data transformation method")
+    parser.add_argument("--separate-sex", action="store_true", default=True,
+                        help="Create separate plots for each sex")
+    parser.add_argument("--combined-sex", action="store_true", 
+                        help="Create combined plots with sex distinguished by color")
     
     args = parser.parse_args()
+    
+    # Handle sex separation argument
+    separate_by_sex = not args.combined_sex if args.combined_sex else args.separate_sex
     
     if args.gui or not args.csv:
         # Launch GUI
@@ -1481,14 +1917,15 @@ def main():
             analyzer.print_summary_report()
             if not args.no_behavioral:
                 analyzer.print_behavioral_analysis_report()
-            
+              
             # Generate plots
             if not args.no_plots:
-                analyzer.plot_velocity_profiles(show_individual_traces=args.show_individual)
+                analyzer.plot_velocity_profiles(show_individual_traces=args.show_individual,
+                                              separate_by_sex=separate_by_sex)
                 if not args.no_behavioral:
-                    analyzer.plot_behavioral_ratios()
+                    analyzer.plot_behavioral_ratios(separate_by_sex=separate_by_sex)
             
             analyzer.save_results()
 
 if __name__ == "__main__":
-    main()
+    main()  
