@@ -88,40 +88,102 @@ def normalize_sex(sex_str: str) -> str:
 
 def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
     """
-    Parse metadata from filename with format: PC1_5.28.2025_m_wt_3hr#
-    Expected format: PC#_date_sex_strain_treatment#
+    Parse metadata from filename with flexible ordering.
+    Expected components: PC#, date, sex, strain/genotype, treatment
+    
+    Examples:
+        PC8_5.2.2025_tph-1_h_3hr
+        PC8_5.2.2025_h_tph-1_3hr
+        PC1_5.28.2025_m_wt_3hr
     
     Returns dict with keys: pc_number, date, sex, strain_genotype, treatment
     Returns None if parsing fails.
     """
-    # Remove file extension
-    basename = Path(filename).stem
+    # Remove file extension but handle dots in the filename (like dates)
+    # Only remove common file extensions
+    basename = filename
+    for ext in ['.csv', '.txt', '.CSV', '.TXT']:
+        if basename.endswith(ext):
+            basename = basename[:-len(ext)]
+            break
     
-    # Support both _ and - as delimiters
-    parts = re.split(r'[_\-]', basename)
+    # Split by underscore only (preserve hyphens in strain names like tph-1)
+    parts = basename.split('_')
     
-    if len(parts) < 5:
+    if len(parts) < 4:  # Need at least PC, date, sex, strain
         return None
     
     try:
-        # Extract components
+        # PC number (must be first)
         pc_part = parts[0].strip()
-        date_part = parts[1].strip()
-        sex_part = parts[2].strip()
-        strain_part = parts[3].strip()
-        treatment_part = parts[4].strip()
-        
-        # Validate PC number format
         if not re.match(r'^PC\d+$', pc_part, re.IGNORECASE):
             return None
+        pc_number = pc_part.upper()
         
-        # Normalize components
-        pc_number = pc_part.upper()  # Keep PC uppercase
+        # Date (must be second) - look for date pattern
+        date_part = parts[1].strip()
+        if not re.search(r'\d', date_part):  # Must contain digits
+            return None
         date = normalize_date(date_part)
-        sex = normalize_sex(sex_part)
-        strain_genotype = strain_part.lower()
-        # Remove trailing # from treatment and normalize
-        treatment = re.sub(r'#*$', '', treatment_part).lower()
+        
+        # Now parse the remaining parts flexibly (parts[2:])
+        remaining_parts = [p.strip() for p in parts[2:] if p.strip()]
+        
+        if len(remaining_parts) < 2:  # Need at least sex and strain
+            return None
+        
+        # Identify each component by its characteristics
+        sex_candidates = []
+        strain_candidates = []
+        treatment_candidates = []
+        
+        known_sex_values = {'m', 'f', 'h', 'male', 'female', 'hermaphrodite', 'herm'}
+        # Treatment patterns: only fed, #hr, #min
+        treatment_patterns = [
+            r'\d+hr$',      # 3hr, 6hr, 24hr (must end with hr)
+            r'\d+min$',     # 30min, 45min (must end with min)
+            r'^fed$',       # fed (exact match)
+        ]
+        
+        for i, part in enumerate(remaining_parts):
+            part_lower = part.lower()
+            
+            # Check if it's a sex identifier (single letter or known sex term)
+            if part_lower in known_sex_values:
+                sex_candidates.append((i, part))
+            # Check if it looks like treatment
+            elif any(re.search(pattern, part_lower) for pattern in treatment_patterns):
+                treatment_candidates.append((i, part))
+            # Otherwise, it's likely a strain/genotype
+            else:
+                strain_candidates.append((i, part))
+        
+        # Extract sex (required)
+        if not sex_candidates:
+            return None
+        sex = normalize_sex(sex_candidates[0][1])
+        
+        # Extract treatment (default to 'fed' if not specified)
+        treatment = 'fed'  # Default treatment
+        treatment_idx = None
+        if treatment_candidates:
+            treatment = re.sub(r'#*$', '', treatment_candidates[0][1]).lower()
+            treatment_idx = treatment_candidates[0][0]
+        
+        # Extract strain - everything that's not sex or treatment
+        sex_idx = sex_candidates[0][0]
+        used_indices = {sex_idx}
+        if treatment_idx is not None:
+            used_indices.add(treatment_idx)
+        
+        strain_parts = [remaining_parts[i] for i in range(len(remaining_parts)) 
+                       if i not in used_indices]
+        
+        if not strain_parts:
+            return None
+        
+        # Combine strain parts with hyphens (in case they were split)
+        strain_genotype = '-'.join(strain_parts).lower()
         
         return {
             'pc_number': pc_number,
@@ -713,7 +775,9 @@ class App(tk.Tk):
         # Show any failed files
         if failed_files:
             failed_msg = "The following files could not be parsed:\n\n" + "\n".join(failed_files)
-            failed_msg += "\n\nExpected format: PC1_5.28.2025_m_wt_3hr#"
+            failed_msg += "\n\nExpected format: PC#_date_sex_strain OR PC#_date_sex_strain_treatment"
+            failed_msg += "\nTreatment defaults to 'fed' if not specified"
+            failed_msg += "\nValid treatments: fed, 3hr, 6hr, 30min, etc."
             messagebox.showwarning("Parsing Failures", failed_msg)
             
             if not parsed_data:
