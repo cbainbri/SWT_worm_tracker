@@ -2,8 +2,8 @@
 """
 CSV/TXT Organizer UI (Wide → Long) with sequential metadata dialogs, smart re-import, and filename inference.
 
-FIXED: food_encounter now correctly labels only when nose enters BEFORE or WITH centroid
-       (not when centroid is already on food from tracking recovery)
+FIXED: food_encounter now correctly labels ONLY when nose enters FIRST (0→1) while centroid stays 0
+       (not when centroid is already on, or when both enter simultaneously)
 
 What's new in this version
 - Column order: `source_file` is now the FIRST column in the composite.
@@ -14,7 +14,7 @@ What's new in this version
   `assay_num` for the current import batch (does not break if long files are added).
 - Remembers last-entered metadata per session and pre-fills dialogs.
 - `nose_on_food`: binary flag for when nose is on food
-- `food_encounter`: marks "food" only when nose enters BEFORE or WITH centroid (true entry, not tracking recovery)
+- `food_encounter`: marks "food" ONLY when nose enters first (0→1) while centroid stays 0 (true biological entry)
 - NEW: Filename inference mode - automatically parse metadata from standardized filenames
   Format: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)
 
@@ -264,16 +264,18 @@ def enforce_column_order(df: pd.DataFrame) -> pd.DataFrame:
 def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
     """
     Creates food_encounter column that marks 'food' only when the animal
-    ENTERS the food (nose touches before or at same time as centroid).
+    ENTERS the food with nose FIRST (centroid follows after).
     
-    Valid food encounter:
-    1. Nose goes 0→1 while centroid is still 0 (nose enters first)
-    2. Nose and centroid both go 0→1 simultaneously (tie)
+    Valid food encounter - ONLY ONE CASE:
+    - Nose goes 0→1 while centroid STAYS 0 (nose enters first, body follows later)
     
     Invalid (NOT labeled):
-    - Centroid is already 1 when nose goes 0→1 (animal already on food, likely tracking recovery)
+    - Centroid already 1 when nose goes 0→1 (animal already on food, tracking recovery)
+    - Nose and centroid both go 0→1 simultaneously (both already on food)
+    - Nose already 1 (nose was already touching food)
     
-    This prevents labeling false "encounters" from tracking gaps/recovery.
+    The ONLY valid entry is: nose_before=0, nose_now=1, centroid_before=0, centroid_now=0
+    This is the biological reality - the nose touches first, then the body moves onto food.
     """
     if 'nose_on_food' not in df.columns:
         df['food_encounter'] = ''
@@ -300,18 +302,23 @@ def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
             for i in range(1, len(nose_data)):
                 # Check if nose goes 0→1
                 if nose_data[i-1] == 0 and nose_data[i] == 1:
-                    # Check centroid state BEFORE transition
+                    # Get states before and at transition
+                    nose_before = nose_data[i-1]
+                    nose_now = nose_data[i]
                     centroid_before = centroid_data[i-1]
+                    centroid_now = centroid_data[i]
                     
-                    # Valid entry: centroid was 0 before nose hit
-                    # (nose enters first OR simultaneously)
-                    if centroid_before == 0:
+                    # Valid entry ONLY if:
+                    # - Nose was 0, now 1 (already checked above)
+                    # - Centroid was 0 AND STAYS 0 (nose enters first, body not yet on)
+                    if nose_before == 0 and nose_now == 1 and centroid_before == 0 and centroid_now == 0:
                         # Mark this as food encounter
                         original_idx = track_indices[i]
                         df.loc[original_idx, 'food_encounter'] = 'food'
                         break  # Only mark the FIRST valid entry
-                    # else: centroid was already 1 = animal already on food
-                    #       (likely tracking recovery) - skip this transition
+                    # else: 
+                    # - centroid_before == 1: already on food (tracking recovery)
+                    # - centroid_now == 1: simultaneous entry (both already on)
     else:
         # If no track_num, treat entire dataset as one track
         nose_data = df['nose_on_food'].values
@@ -319,7 +326,8 @@ def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
         
         for i in range(1, len(nose_data)):
             if nose_data[i-1] == 0 and nose_data[i] == 1:
-                if centroid_data[i-1] == 0:
+                # Check centroid stays 0
+                if centroid_data[i-1] == 0 and centroid_data[i] == 0:
                     df.iloc[i, df.columns.get_loc('food_encounter')] = 'food'
                     break
     
@@ -843,7 +851,7 @@ class App(tk.Tk):
             "Reads all .csv/.txt files from a directory (default: ./analyze),\n"
             "asks for metadata per file (manual or filename inference), and saves a composite long-format CSV.\n"
             "Supports new wide files with centroid_on_food and nose_on_food.\n"
-            "FIXED: Creates food_encounter column marking only TRUE entries (nose enters before/with centroid).\n"
+            "FIXED: Creates food_encounter marking ONLY when nose enters FIRST (centroid stays 0).\n"
             "Filename format for inference: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)"
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
@@ -948,7 +956,7 @@ class App(tk.Tk):
         desc = ttk.Label(frm, text=(
             "Open an existing composite CSV, select a new data directory, and append new assays.\n"
             "Assay numbering continues from the last assay_num.\n"
-            "FIXED: Recreates food_encounter column with corrected logic for all data.\n"
+            "FIXED: Recreates food_encounter - labels ONLY when nose enters first (centroid stays 0).\n"
             "Supports both manual input and filename inference for new files."
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
