@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Dict, Tuple, Optional, List
 import traceback
 import warnings
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -384,11 +385,22 @@ class RichardsCurveFitterGUI:
         # Data storage
         self.data_path = None
         self.data = None
+        self.off_food_data = None  # OFF-food baseline data
+        self.on_food_data = None   # ON-food encounter data
+        self.off_food_path = None
+        self.on_food_path = None
         self.results_single = None
         self.results_double = None
         self.outlier_report = None
         self.output_dir = None
         self.windowed_data = None
+        
+        # Behavioral context results
+        self.behavioral_context_results = None
+        self.behavioral_context_summary = None
+        
+        # Analysis mode for behavioral context
+        self.context_mode = tk.StringVar(value="none")  # "none", "on_food_only", "both"
         
         # Parameters
         self.pixels_per_mm = 104.0
@@ -421,19 +433,46 @@ class RichardsCurveFitterGUI:
         self.create_log_section(main)
     
     def create_file_section(self, parent):
-        frame = ttk.LabelFrame(parent, text="Data File", padding="10")
+        frame = ttk.LabelFrame(parent, text="Data Files", padding="10")
         frame.grid(row=1, column=0, sticky="ew", pady=5)
         frame.columnconfigure(1, weight=1)
         
-        ttk.Label(frame, text="CSV file:").grid(row=0, column=0, sticky="w", pady=5)
-        self.file_label = ttk.Label(frame, text="No file loaded", foreground="gray")
-        self.file_label.grid(row=0, column=1, sticky="w", padx=5)
-        ttk.Button(frame, text="Load CSV", command=self.load_file).grid(row=0, column=2, padx=5)
+        # Behavioral context analysis mode
+        mode_frame = ttk.Frame(frame)
+        mode_frame.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 10))
+        ttk.Label(mode_frame, text="Behavioral Context Mode:", font=("Helvetica", 10, "bold")).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Standard (single file)", 
+                       variable=self.context_mode, value="none",
+                       command=self.on_context_mode_change).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="ON-food only", 
+                       variable=self.context_mode, value="on_food_only",
+                       command=self.on_context_mode_change).pack(side="left", padx=5)
+        ttk.Radiobutton(mode_frame, text="Both (OFF + ON food)", 
+                       variable=self.context_mode, value="both",
+                       command=self.on_context_mode_change).pack(side="left", padx=5)
         
-        ttk.Label(frame, text="Output directory:").grid(row=1, column=0, sticky="w", pady=5)
+        ttk.Separator(frame, orient="horizontal").grid(row=1, column=0, columnspan=3, sticky="ew", pady=5)
+        
+        # Standard file loading (for non-context or ON-food only mode)
+        ttk.Label(frame, text="ON-FOOD data file:").grid(row=2, column=0, sticky="w", pady=5)
+        self.file_label = ttk.Label(frame, text="No file loaded", foreground="gray")
+        self.file_label.grid(row=2, column=1, sticky="w", padx=5)
+        ttk.Button(frame, text="Load ON-food CSV", command=self.load_file).grid(row=2, column=2, padx=5)
+        
+        # OFF-food file loading (only for "both" mode)
+        ttk.Label(frame, text="OFF-food data file:").grid(row=3, column=0, sticky="w", pady=5)
+        self.off_food_label = ttk.Label(frame, text="Not required", foreground="gray")
+        self.off_food_label.grid(row=3, column=1, sticky="w", padx=5)
+        self.off_food_btn = ttk.Button(frame, text="Load OFF-food CSV", command=self.load_off_food, state='disabled')
+        self.off_food_btn.grid(row=3, column=2, padx=5)
+        
+        ttk.Separator(frame, orient="horizontal").grid(row=4, column=0, columnspan=3, sticky="ew", pady=5)
+        
+        # Output directory
+        ttk.Label(frame, text="Output directory:").grid(row=5, column=0, sticky="w", pady=5)
         self.output_label = ttk.Label(frame, text="Not selected", foreground="gray")
-        self.output_label.grid(row=1, column=1, sticky="w", padx=5)
-        ttk.Button(frame, text="Select Output Dir", command=self.select_output_dir).grid(row=1, column=2, padx=5)
+        self.output_label.grid(row=5, column=1, sticky="w", padx=5)
+        ttk.Button(frame, text="Select Output Dir", command=self.select_output_dir).grid(row=5, column=2, padx=5)
     
     def create_parameters_section(self, parent):
         frame = ttk.LabelFrame(parent, text="Analysis Parameters", padding="10")
@@ -595,6 +634,28 @@ class RichardsCurveFitterGUI:
     def clear_log(self):
         self.log_text.delete(1.0, tk.END)
     
+    def on_context_mode_change(self):
+        """Handle changes to behavioral context analysis mode"""
+        mode = self.context_mode.get()
+        
+        if mode == "both":
+            self.off_food_btn.config(state='normal')
+            self.off_food_label.config(text="No file loaded", foreground="gray")
+            self.file_label.config(text="ON-food (No file loaded)" if self.data is None else f"ON-food: {self.data_path.name}", 
+                                  foreground="gray" if self.data is None else "black")
+        elif mode == "on_food_only":
+            self.off_food_btn.config(state='disabled')
+            self.off_food_label.config(text="Not required", foreground="gray")
+            self.file_label.config(text="ON-food (No file loaded)" if self.data is None else f"ON-food: {self.data_path.name}",
+                                  foreground="gray" if self.data is None else "black")
+        else:  # none
+            self.off_food_btn.config(state='disabled')
+            self.off_food_label.config(text="Not required", foreground="gray")
+            self.file_label.config(text="No file loaded" if self.data is None else self.data_path.name,
+                                  foreground="gray" if self.data is None else "black")
+        
+        self.update_run_button_state()
+    
     def load_file(self):
         filename = filedialog.askopenfilename(
             title="Select CSV file",
@@ -604,14 +665,39 @@ class RichardsCurveFitterGUI:
             try:
                 self.data = pd.read_csv(filename)
                 self.data_path = Path(filename)
-                self.file_label.config(text=self.data_path.name, foreground="black")
+                
+                mode = self.context_mode.get()
+                if mode in ["on_food_only", "both"]:
+                    self.on_food_data = self.data
+                    self.on_food_path = self.data_path
+                    self.file_label.config(text=f"ON-food: {self.data_path.name}", foreground="black")
+                else:
+                    self.file_label.config(text=self.data_path.name, foreground="black")
+                
                 self.update_run_button_state()
                 self.log(f"Loaded: {filename}")
                 self.log(f"  Rows: {len(self.data)}")
                 self.log(f"  Columns: {', '.join(self.data.columns)}")
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to load file:\n{str(e)}")
-                self.log(f"ERROR: {str(e)}")
+                self.log(f"ERROR loading file: {str(e)}")
+    
+    def load_off_food(self):
+        filename = filedialog.askopenfilename(
+            title="Select OFF-food baseline CSV file",
+            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
+        )
+        if filename:
+            try:
+                self.off_food_data = pd.read_csv(filename)
+                self.off_food_path = Path(filename)
+                self.off_food_label.config(text=f"OFF-food: {self.off_food_path.name}", foreground="black")
+                self.update_run_button_state()
+                self.log(f"Loaded OFF-food baseline: {filename}")
+                self.log(f"  Rows: {len(self.off_food_data)}")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to load OFF-food file:\n{str(e)}")
+                self.log(f"ERROR loading OFF-food file: {str(e)}")
     
     def select_output_dir(self):
         directory = filedialog.askdirectory(title="Select Output Directory")
@@ -622,7 +708,23 @@ class RichardsCurveFitterGUI:
             self.log(f"Output directory: {directory}")
     
     def update_run_button_state(self):
-        if self.data is not None and self.output_dir is not None:
+        mode = self.context_mode.get()
+        
+        if mode == "both":
+            # Need ON-food, OFF-food, and output dir
+            ready = (self.data is not None and 
+                    self.off_food_data is not None and 
+                    self.output_dir is not None)
+        elif mode == "on_food_only":
+            # Need ON-food and output dir
+            ready = (self.data is not None and 
+                    self.output_dir is not None)
+        else:  # none
+            # Need data and output dir
+            ready = (self.data is not None and 
+                    self.output_dir is not None)
+        
+        if ready:
             self.run_btn.config(state='normal')
         else:
             self.run_btn.config(state='disabled')
@@ -763,6 +865,67 @@ class RichardsCurveFitterGUI:
                 self.log("="*70)
                 self.compare_models()
             
+            # Behavioral Context Analysis
+            context_mode = self.context_mode.get()
+            if context_mode != "none":
+                # If mode is "both", need to process OFF-food data too
+                if context_mode == "both" and self.off_food_data is not None:
+                    self.log("\n" + "="*70)
+                    self.log("PROCESSING OFF-FOOD BASELINE DATA")
+                    self.log("="*70)
+                    
+                    # Process OFF-food data through same pipeline
+                    df_off = self.off_food_data.copy()
+                    
+                    # Apply same preprocessing
+                    if "speed" not in df_off.columns and {"x","y","time"}.issubset(df_off.columns):
+                        self.log("Computing speed from x,y coordinates...")
+                        df_off["speed"] = calculate_speed_from_xy(
+                            df_off["x"].to_numpy(), 
+                            df_off["y"].to_numpy(),
+                            df_off["time"].to_numpy(), 
+                            smoothing_window=3,
+                            pixels_per_mm=self.pixels_per_mm
+                        )
+                    elif "speed" in df_off.columns:
+                        df_off = convert_speed_to_mm_s(df_off, pixels_per_mm=self.pixels_per_mm, assume_pixels=True)
+                    
+                    if self.enable_filtering_var.get():
+                        self.log("Applying outlier filtering to OFF-food data...")
+                        df_off, _ = apply_hybrid_outlier_filter(
+                            df_off,
+                            percentile_lower=self.percentile_lower,
+                            percentile_upper=self.percentile_upper,
+                            mad_threshold=self.mad_threshold,
+                        )
+                    
+                    if self.enable_smoothing_var.get():
+                        self.log("Applying smoothing to OFF-food data...")
+                        df_off = apply_smoothing(
+                            df_off,
+                            window=self.smooth_window,
+                            method=self.smooth_method_var.get(),
+                        )
+                    
+                    # Extract windows for OFF-food (they don't have food encounters, so just use full trace)
+                    # For OFF-food, we just want y_initial which represents baseline speed
+                    windowed_off = extract_windows(df_off, 
+                                                   window_before=self.window_before,
+                                                   window_after=self.window_after,
+                                                   min_points=10)
+                    
+                    self.log(f"Found {len(windowed_off)} OFF-food animals with valid windows")
+                    
+                    # Fit model to OFF-food data
+                    self.log("\nFitting curves to OFF-food baseline data...")
+                    off_food_results = self.fit_model(df_off, windowed_off, "off_food_baseline")
+                    
+                    # Store OFF-food results temporarily for behavioral context calculation
+                    self.off_food_results = off_food_results
+                
+                # Now calculate behavioral contexts
+                self.calculate_behavioral_context()
+            
             self.log("\n" + "="*70)
             self.log("ANALYSIS COMPLETE")
             self.log("="*70)
@@ -779,8 +942,14 @@ class RichardsCurveFitterGUI:
     
     def fit_model(self, df_master, windowed, model_type):
         """Fit model and save all outputs to disk"""
-        # Create output directory structure
+        # Create output directory structure (clear if exists to ensure fresh outputs)
         model_dir = self.output_dir / f"model_{model_type}"
+        
+        # Remove existing directory if it exists to start fresh
+        if model_dir.exists():
+            shutil.rmtree(model_dir)
+            self.log(f"  Cleared existing {model_type} model directory")
+        
         model_dir.mkdir(parents=True, exist_ok=True)
         
         results = []
@@ -954,6 +1123,19 @@ class RichardsCurveFitterGUI:
     
     def compare_models(self):
         """Compare single vs double models and save comparison files"""
+        # Clean up old comparison files
+        comparison_files = [
+            "model_comparison_summary.csv",
+            "r2_scatter_single_vs_double.png",
+            "r2_violin_single_vs_double.png",
+            "delta_AIC_hist.png",
+            "delta_BIC_hist.png"
+        ]
+        for fname in comparison_files:
+            fpath = self.output_dir / fname
+            if fpath.exists():
+                fpath.unlink()
+        
         m = pd.merge(
             self.results_single[["assay_num","track_num","r_squared","aic","bic"]],
             self.results_double[["assay_num","track_num","r_squared","aic","bic"]],
@@ -1064,6 +1246,303 @@ class RichardsCurveFitterGUI:
             plt.tight_layout()
             plt.savefig(self.output_dir / fname, bbox_inches="tight", dpi=150)
             plt.close()
+    
+    def calculate_behavioral_context(self):
+        """Calculate food detection and food encounter behavioral contexts"""
+        mode = self.context_mode.get()
+        
+        if mode == "none":
+            self.log("\nSkipping behavioral context analysis (Standard mode)")
+            return
+        
+        self.log("\n" + "="*70)
+        self.log("BEHAVIORAL CONTEXT ANALYSIS")
+        self.log("="*70)
+        
+        # Determine which model to use (prefer single, fall back to double)
+        if self.results_single is not None:
+            on_food_results = self.results_single.copy()
+            model_used = "single"
+        elif self.results_double is not None:
+            on_food_results = self.results_double.copy()
+            # For double model, use y1_i and y2_f
+            on_food_results['y_initial'] = on_food_results['y1_i']
+            on_food_results['y_final'] = on_food_results['y2_f']
+            model_used = "double"
+        else:
+            self.log("ERROR: No model results available for behavioral context analysis")
+            return
+        
+        self.log(f"Using {model_used} model results")
+        self.log(f"ON-food animals: {len(on_food_results)}")
+        
+        # Filter to converged fits only
+        on_food_results = on_food_results[on_food_results['converged'] == True].copy()
+        self.log(f"Converged fits: {len(on_food_results)}")
+        
+        if len(on_food_results) == 0:
+            self.log("ERROR: No converged fits for behavioral context analysis")
+            return
+        
+        # Grouping columns
+        group_cols = ['treatment', 'sex', 'strain_genotype']
+        
+        if mode == "both":
+            self.log("\n" + "-"*60)
+            self.log("FOOD DETECTION CONTEXT (OFF-food baseline)")
+            self.log("-"*60)
+            
+            # Use OFF-food results that were fitted separately
+            if not hasattr(self, 'off_food_results') or self.off_food_results is None:
+                self.log("ERROR: OFF-food results not available")
+                return
+            
+            off_food_results = self.off_food_results.copy()
+            if model_used == "double":
+                off_food_results['y_initial'] = off_food_results['y1_i']
+            
+            off_food_results = off_food_results[off_food_results['converged'] == True].copy()
+            self.log(f"OFF-food converged fits: {len(off_food_results)}")
+            
+            # Calculate mean OFF-food y_initial per group
+            off_baselines = off_food_results.groupby(group_cols)['y_initial'].agg(['mean', 'std', 'count']).reset_index()
+            off_baselines.columns = ['treatment', 'sex', 'strain_genotype', 'off_food_baseline', 'off_food_std', 'off_food_n']
+            
+            self.log("\nOFF-food baselines by group:")
+            for _, row in off_baselines.iterrows():
+                self.log(f"  {row['treatment']} | {row['sex']} | {row['strain_genotype']}: " +
+                        f"{row['off_food_baseline']:.4f} ± {row['off_food_std']:.4f} mm/s (n={int(row['off_food_n'])})")
+            
+            # Merge baselines with ON-food data
+            on_food_results = on_food_results.merge(
+                off_baselines[['treatment', 'sex', 'strain_genotype', 'off_food_baseline']], 
+                on=group_cols, 
+                how='left'
+            )
+            
+            # Calculate food detection score
+            on_food_results['food_detection_score'] = on_food_results['y_initial'] / on_food_results['off_food_baseline']
+            self.log(f"\nCalculated food detection scores for {len(on_food_results)} animals")
+        
+        # Food encounter context (always calculated for on_food_only and both modes)
+        self.log("\n" + "-"*60)
+        self.log("FOOD ENCOUNTER CONTEXT (ON-food before baseline)")
+        self.log("-"*60)
+        
+        # Calculate mean ON-food y_initial per group
+        on_baselines = on_food_results.groupby(group_cols)['y_initial'].agg(['mean', 'std', 'count']).reset_index()
+        on_baselines.columns = ['treatment', 'sex', 'strain_genotype', 'on_food_baseline', 'on_food_std', 'on_food_n']
+        
+        self.log("\nON-food before baselines by group:")
+        for _, row in on_baselines.iterrows():
+            self.log(f"  {row['treatment']} | {row['sex']} | {row['strain_genotype']}: " +
+                    f"{row['on_food_baseline']:.4f} ± {row['on_food_std']:.4f} mm/s (n={int(row['on_food_n'])})")
+        
+        # Merge baselines
+        on_food_results = on_food_results.merge(
+            on_baselines[['treatment', 'sex', 'strain_genotype', 'on_food_baseline']], 
+            on=group_cols, 
+            how='left'
+        )
+        
+        # Calculate food encounter score
+        on_food_results['food_encounter_score'] = on_food_results['y_final'] / on_food_results['on_food_baseline']
+        self.log(f"\nCalculated food encounter scores for {len(on_food_results)} animals")
+        
+        # Store results
+        self.behavioral_context_results = on_food_results
+        
+        # Calculate group summaries
+        self.calculate_behavioral_context_summaries()
+        
+        # Save results
+        self.save_behavioral_context_results()
+        
+        # Generate plots
+        self.plot_behavioral_context()
+        
+        self.log("\n" + "="*70)
+        self.log("BEHAVIORAL CONTEXT ANALYSIS COMPLETE")
+        self.log("="*70)
+    
+    def calculate_behavioral_context_summaries(self):
+        """Calculate group-level summary statistics for behavioral contexts"""
+        group_cols = ['treatment', 'sex', 'strain_genotype']
+        
+        summaries = []
+        for group_vals, group_data in self.behavioral_context_results.groupby(group_cols):
+            treatment, sex, genotype = group_vals
+            
+            summary = {
+                'treatment': treatment,
+                'sex': sex,
+                'genotype': genotype,
+                'n': len(group_data)
+            }
+            
+            # y_initial and y_final statistics
+            summary['y_initial_mean'] = group_data['y_initial'].mean()
+            summary['y_initial_std'] = group_data['y_initial'].std()
+            summary['y_initial_sem'] = group_data['y_initial'].sem()
+            
+            summary['y_final_mean'] = group_data['y_final'].mean()
+            summary['y_final_std'] = group_data['y_final'].std()
+            summary['y_final_sem'] = group_data['y_final'].sem()
+            
+            # Food detection scores (if available)
+            if 'food_detection_score' in group_data.columns:
+                detection_scores = group_data['food_detection_score'].dropna()
+                if len(detection_scores) > 0:
+                    summary['food_detection_mean'] = detection_scores.mean()
+                    summary['food_detection_std'] = detection_scores.std()
+                    summary['food_detection_sem'] = detection_scores.sem()
+                else:
+                    summary['food_detection_mean'] = np.nan
+                    summary['food_detection_std'] = np.nan
+                    summary['food_detection_sem'] = np.nan
+            
+            # Food encounter scores
+            encounter_scores = group_data['food_encounter_score'].dropna()
+            if len(encounter_scores) > 0:
+                summary['food_encounter_mean'] = encounter_scores.mean()
+                summary['food_encounter_std'] = encounter_scores.std()
+                summary['food_encounter_sem'] = encounter_scores.sem()
+            else:
+                summary['food_encounter_mean'] = np.nan
+                summary['food_encounter_std'] = np.nan
+                summary['food_encounter_sem'] = np.nan
+            
+            summaries.append(summary)
+        
+        self.behavioral_context_summary = pd.DataFrame(summaries)
+        self.log(f"\nCalculated summaries for {len(self.behavioral_context_summary)} groups")
+    
+    def save_behavioral_context_results(self):
+        """Save behavioral context results to CSV files"""
+        context_dir = self.output_dir / "behavioral_context"
+        context_dir.mkdir(exist_ok=True)
+        
+        # Save per-animal results
+        animal_path = context_dir / "behavioral_context_per_animal.csv"
+        self.behavioral_context_results.to_csv(animal_path, index=False)
+        self.log(f"\nSaved per-animal context scores: {animal_path.name}")
+        
+        # Save group summaries
+        summary_path = context_dir / "behavioral_context_group_summary.csv"
+        self.behavioral_context_summary.to_csv(summary_path, index=False)
+        self.log(f"Saved group summary: {summary_path.name}")
+    
+    def plot_behavioral_context(self):
+        """Generate plots for behavioral context analysis"""
+        context_dir = self.output_dir / "behavioral_context"
+        
+        mode = self.context_mode.get()
+        group_cols = ['treatment', 'sex', 'genotype']
+        
+        # Create group labels
+        summary = self.behavioral_context_summary.copy()
+        summary['group_label'] = (summary['treatment'].astype(str) + '|' + 
+                                 summary['sex'].astype(str) + '|' + 
+                                 summary['genotype'].astype(str))
+        
+        self.log("\nGenerating behavioral context plots...")
+        
+        # Plot 1: Food encounter scores by group
+        self.root.update_idletasks()
+        fig, ax = plt.subplots(figsize=(max(8, len(summary)*0.8), 6))
+        x_pos = np.arange(len(summary))
+        ax.bar(x_pos, summary['food_encounter_mean'], 
+               yerr=summary['food_encounter_sem'],
+               capsize=5, alpha=0.7, edgecolor='black')
+        ax.set_xlabel('Group', fontsize=11)
+        ax.set_ylabel('Food Encounter Score\n(y_final / y_initial baseline)', fontsize=11)
+        ax.set_title('Food Encounter Context by Group', fontsize=13, fontweight='bold')
+        ax.set_xticks(x_pos)
+        ax.set_xticklabels(summary['group_label'], rotation=45, ha='right')
+        ax.axhline(1.0, color='red', linestyle='--', alpha=0.5, label='No change')
+        ax.legend()
+        ax.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+        plt.savefig(context_dir / "food_encounter_by_group.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        # Plot 2: Food detection scores by group (if available)
+        if mode == "both" and 'food_detection_mean' in summary.columns:
+            self.root.update_idletasks()
+            fig, ax = plt.subplots(figsize=(max(8, len(summary)*0.8), 6))
+            x_pos = np.arange(len(summary))
+            ax.bar(x_pos, summary['food_detection_mean'], 
+                   yerr=summary['food_detection_sem'],
+                   capsize=5, alpha=0.7, edgecolor='black', color='orange')
+            ax.set_xlabel('Group', fontsize=11)
+            ax.set_ylabel('Food Detection Score\n(y_initial ON / y_initial OFF)', fontsize=11)
+            ax.set_title('Food Detection Context by Group', fontsize=13, fontweight='bold')
+            ax.set_xticks(x_pos)
+            ax.set_xticklabels(summary['group_label'], rotation=45, ha='right')
+            ax.axhline(1.0, color='red', linestyle='--', alpha=0.5, label='No detection')
+            ax.legend()
+            ax.grid(axis='y', alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(context_dir / "food_detection_by_group.png", dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        # Plot 3: Detection vs Encounter scatter (if both available)
+        if mode == "both" and 'food_detection_score' in self.behavioral_context_results.columns:
+            self.root.update_idletasks()
+            fig, ax = plt.subplots(figsize=(8, 8))
+            
+            # Color by treatment
+            treatments = self.behavioral_context_results['treatment'].unique()
+            colors = plt.cm.Set2(np.linspace(0, 1, len(treatments)))
+            
+            for treatment, color in zip(treatments, colors):
+                subset = self.behavioral_context_results[self.behavioral_context_results['treatment'] == treatment]
+                ax.scatter(subset['food_detection_score'], subset['food_encounter_score'],
+                          label=treatment, alpha=0.6, s=50, color=color, edgecolors='black', linewidths=0.5)
+            
+            ax.axhline(1.0, color='gray', linestyle='--', alpha=0.5)
+            ax.axvline(1.0, color='gray', linestyle='--', alpha=0.5)
+            ax.set_xlabel('Food Detection Score\n(y_initial ON / y_initial OFF)', fontsize=11)
+            ax.set_ylabel('Food Encounter Score\n(y_final / y_initial ON)', fontsize=11)
+            ax.set_title('Food Detection vs Food Encounter', fontsize=13, fontweight='bold')
+            ax.legend()
+            ax.grid(alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(context_dir / "detection_vs_encounter_scatter.png", dpi=150, bbox_inches='tight')
+            plt.close()
+        
+        # Plot 4: y_initial and y_final comparison
+        self.root.update_idletasks()
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+        x_pos = np.arange(len(summary))
+        
+        # y_initial
+        ax1.bar(x_pos, summary['y_initial_mean'], 
+               yerr=summary['y_initial_sem'],
+               capsize=5, alpha=0.7, edgecolor='black', color='lightblue')
+        ax1.set_xlabel('Group', fontsize=11)
+        ax1.set_ylabel('Speed (mm/s)', fontsize=11)
+        ax1.set_title('y_initial (Before Food Encounter)', fontsize=12, fontweight='bold')
+        ax1.set_xticks(x_pos)
+        ax1.set_xticklabels(summary['group_label'], rotation=45, ha='right')
+        ax1.grid(axis='y', alpha=0.3)
+        
+        # y_final
+        ax2.bar(x_pos, summary['y_final_mean'], 
+               yerr=summary['y_final_sem'],
+               capsize=5, alpha=0.7, edgecolor='black', color='lightcoral')
+        ax2.set_xlabel('Group', fontsize=11)
+        ax2.set_ylabel('Speed (mm/s)', fontsize=11)
+        ax2.set_title('y_final (After Food Encounter)', fontsize=12, fontweight='bold')
+        ax2.set_xticks(x_pos)
+        ax2.set_xticklabels(summary['group_label'], rotation=45, ha='right')
+        ax2.grid(axis='y', alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(context_dir / "y_initial_vs_y_final_by_group.png", dpi=150, bbox_inches='tight')
+        plt.close()
+        
+        self.log(f"Saved {3 if mode == 'both' else 2} behavioral context plots")
     
     def save_results(self):
         """Save preprocessing summary (main results already saved during analysis)"""

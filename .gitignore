@@ -1,6 +1,10 @@
 __pycache__/
 Analysis/Quality Controls/qc_output/
 curve_fitting/richards_analysis_results/
+curve_fitting/model_*/
 Analysis/analyze/OUTPUT/
 *.csv
+*.CSV
+*.PNG
+*.png
 .envrc
