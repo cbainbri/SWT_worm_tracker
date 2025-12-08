@@ -2,6 +2,9 @@
 """
 CSV/TXT Organizer UI (Wide → Long) with sequential metadata dialogs, smart re-import, and filename inference.
 
+FIXED: food_encounter now correctly labels ONLY when nose enters FIRST (0→1) while centroid stays 0
+       (not when centroid is already on, or when both enter simultaneously)
+
 What's new in this version
 - Column order: `source_file` is now the FIRST column in the composite.
 - The last columns are coordinates/flags in this exact order: `x`, `y`, `centroid_on_food`, `nose_on_food`, `food_encounter`.
@@ -10,8 +13,8 @@ What's new in this version
 - Gracefully handles composite/long CSVs produced by this script: reorders columns and assigns
   `assay_num` for the current import batch (does not break if long files are added).
 - Remembers last-entered metadata per session and pre-fills dialogs.
-- `nose_on_food`: binary flag for when nose is on food (previously called food_encounter)
-- `food_encounter`: marks "food" only at the FIRST transition when nose hits food
+- `nose_on_food`: binary flag for when nose is on food
+- `food_encounter`: marks "food" ONLY when nose enters first (0→1) while centroid stays 0 (true biological entry)
 - NEW: Filename inference mode - automatically parse metadata from standardized filenames
   Format: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)
 
@@ -27,7 +30,7 @@ Output columns (final order):
   9...) (any extra columns carried through, if present)
   last-4) x, y, centroid_on_food, nose_on_food, food_encounter
 
-Run: python csv_analysis_ui.py
+Run: python merge_files.py
 Requires: Python 3.9+, pandas
 """
 
@@ -70,9 +73,7 @@ def _infer_delimiter(path: Path) -> str:
 # ------------------------------
 def normalize_date(date_str: str) -> str:
     """Normalize various date formats to a consistent format."""
-    # Remove any extra characters and normalize separators
     date_str = re.sub(r'[^\d\.\-\/]', '', date_str)
-    # Convert - or / to .
     date_str = re.sub(r'[\-\/]', '.', date_str)
     return date_str
 
@@ -99,18 +100,15 @@ def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
     Returns dict with keys: pc_number, date, sex, strain_genotype, treatment
     Returns None if parsing fails.
     """
-    # Remove file extension but handle dots in the filename (like dates)
-    # Only remove common file extensions
     basename = filename
     for ext in ['.csv', '.txt', '.CSV', '.TXT']:
         if basename.endswith(ext):
             basename = basename[:-len(ext)]
             break
     
-    # Split by underscore only (preserve hyphens in strain names like tph-1)
     parts = basename.split('_')
     
-    if len(parts) < 4:  # Need at least PC, date, sex, strain
+    if len(parts) < 4:
         return None
     
     try:
@@ -120,41 +118,37 @@ def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
             return None
         pc_number = pc_part.upper()
         
-        # Date (must be second) - look for date pattern
+        # Date (must be second)
         date_part = parts[1].strip()
-        if not re.search(r'\d', date_part):  # Must contain digits
+        if not re.search(r'\d', date_part):
             return None
         date = normalize_date(date_part)
         
-        # Now parse the remaining parts flexibly (parts[2:])
+        # Parse remaining parts flexibly
         remaining_parts = [p.strip() for p in parts[2:] if p.strip()]
         
-        if len(remaining_parts) < 2:  # Need at least sex and strain
+        if len(remaining_parts) < 2:
             return None
         
-        # Identify each component by its characteristics
+        # Identify components
         sex_candidates = []
         strain_candidates = []
         treatment_candidates = []
         
         known_sex_values = {'m', 'f', 'h', 'male', 'female', 'hermaphrodite', 'herm'}
-        # Treatment patterns: only fed, #hr, #min
         treatment_patterns = [
-            r'\d+hr$',      # 3hr, 6hr, 24hr (must end with hr)
-            r'\d+min$',     # 30min, 45min (must end with min)
-            r'^fed$',       # fed (exact match)
+            r'\d+hr$',
+            r'\d+min$',
+            r'^fed$',
         ]
         
         for i, part in enumerate(remaining_parts):
             part_lower = part.lower()
             
-            # Check if it's a sex identifier (single letter or known sex term)
             if part_lower in known_sex_values:
                 sex_candidates.append((i, part))
-            # Check if it looks like treatment
             elif any(re.search(pattern, part_lower) for pattern in treatment_patterns):
                 treatment_candidates.append((i, part))
-            # Otherwise, it's likely a strain/genotype
             else:
                 strain_candidates.append((i, part))
         
@@ -163,14 +157,14 @@ def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
             return None
         sex = normalize_sex(sex_candidates[0][1])
         
-        # Extract treatment (default to 'fed' if not specified)
-        treatment = 'fed'  # Default treatment
+        # Extract treatment (default to 'fed')
+        treatment = 'fed'
         treatment_idx = None
         if treatment_candidates:
             treatment = re.sub(r'#*$', '', treatment_candidates[0][1]).lower()
             treatment_idx = treatment_candidates[0][0]
         
-        # Extract strain - everything that's not sex or treatment
+        # Extract strain
         sex_idx = sex_candidates[0][0]
         used_indices = {sex_idx}
         if treatment_idx is not None:
@@ -182,7 +176,6 @@ def parse_filename_metadata(filename: str) -> Optional[Dict[str, str]]:
         if not strain_parts:
             return None
         
-        # Combine strain parts with hyphens (in case they were split)
         strain_genotype = '-'.join(strain_parts).lower()
         
         return {
@@ -265,12 +258,24 @@ def enforce_column_order(df: pd.DataFrame) -> pd.DataFrame:
     return df[out]
 
 # ------------------------------
-# Function to create food_encounter column from nose_on_food
+# FIXED: Function to create food_encounter column
+# Only labels when nose enters BEFORE or WITH centroid (not after)
 # ------------------------------
 def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Creates food_encounter column that marks 'food' only at the first transition
-    from 0 to 1 in nose_on_food for each track.
+    Creates food_encounter column that marks 'food' only when the animal
+    ENTERS the food with nose FIRST (centroid follows after).
+    
+    Valid food encounter - ONLY ONE CASE:
+    - Nose goes 0→1 while centroid STAYS 0 (nose enters first, body follows later)
+    
+    Invalid (NOT labeled):
+    - Centroid already 1 when nose goes 0→1 (animal already on food, tracking recovery)
+    - Nose and centroid both go 0→1 simultaneously (both already on food)
+    - Nose already 1 (nose was already touching food)
+    
+    The ONLY valid entry is: nose_before=0, nose_now=1, centroid_before=0, centroid_now=0
+    This is the biological reality - the nose touches first, then the body moves onto food.
     """
     if 'nose_on_food' not in df.columns:
         df['food_encounter'] = ''
@@ -279,26 +284,52 @@ def create_food_encounter_column(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
     df['food_encounter'] = ''
     
+    # Ensure centroid_on_food exists (if not, assume it follows nose)
+    if 'centroid_on_food' not in df.columns:
+        df['centroid_on_food'] = df['nose_on_food'].copy()
+    
     # Group by track to handle each worm separately
     if 'track_num' in df.columns:
         for track_id in df['track_num'].unique():
             mask = df['track_num'] == track_id
-            track_data = df.loc[mask, 'nose_on_food'].reset_index(drop=True)
+            track_indices = df.loc[mask].index.tolist()
             
-            # Find first transition from 0 to 1
-            transitions = (track_data.diff() == 1) & (track_data == 1)
-            if transitions.any():
-                first_encounter_idx = transitions.idxmax()
-                # Get the original index in the full dataframe
-                original_idx = df.loc[mask].iloc[first_encounter_idx].name
-                df.loc[original_idx, 'food_encounter'] = 'food'
+            # Get data as arrays for easier indexing
+            nose_data = df.loc[mask, 'nose_on_food'].values
+            centroid_data = df.loc[mask, 'centroid_on_food'].values
+            
+            # Find all nose 0→1 transitions
+            for i in range(1, len(nose_data)):
+                # Check if nose goes 0→1
+                if nose_data[i-1] == 0 and nose_data[i] == 1:
+                    # Get states before and at transition
+                    nose_before = nose_data[i-1]
+                    nose_now = nose_data[i]
+                    centroid_before = centroid_data[i-1]
+                    centroid_now = centroid_data[i]
+                    
+                    # Valid entry ONLY if:
+                    # - Nose was 0, now 1 (already checked above)
+                    # - Centroid was 0 AND STAYS 0 (nose enters first, body not yet on)
+                    if nose_before == 0 and nose_now == 1 and centroid_before == 0 and centroid_now == 0:
+                        # Mark this as food encounter
+                        original_idx = track_indices[i]
+                        df.loc[original_idx, 'food_encounter'] = 'food'
+                        break  # Only mark the FIRST valid entry
+                    # else: 
+                    # - centroid_before == 1: already on food (tracking recovery)
+                    # - centroid_now == 1: simultaneous entry (both already on)
     else:
         # If no track_num, treat entire dataset as one track
-        nose_data = df['nose_on_food'].reset_index(drop=True)
-        transitions = (nose_data.diff() == 1) & (nose_data == 1)
-        if transitions.any():
-            first_encounter_idx = transitions.idxmax()
-            df.iloc[first_encounter_idx, df.columns.get_loc('food_encounter')] = 'food'
+        nose_data = df['nose_on_food'].values
+        centroid_data = df['centroid_on_food'].values if 'centroid_on_food' in df.columns else nose_data
+        
+        for i in range(1, len(nose_data)):
+            if nose_data[i-1] == 0 and nose_data[i] == 1:
+                # Check centroid stays 0
+                if centroid_data[i-1] == 0 and centroid_data[i] == 0:
+                    df.iloc[i, df.columns.get_loc('food_encounter')] = 'food'
+                    break
     
     return df
 
@@ -315,7 +346,6 @@ def detect_time_column(df: pd.DataFrame) -> str:
                 return c
     return cols[0]
 
-# classify columns and catch centroid_on_food separately
 _CENTROID_FLAG_PAT = re.compile(r'centroid[_ ]?on[_ ]?food', re.I)
 _X_PAT = re.compile(r'(?:^|[^a-z])(x|xpos|x_coord|xcoordinate|xposition)\b', re.I)
 _Y_PAT = re.compile(r'(?:^|[^a-z])(y|ypos|y_coord|ycoordinate|yposition)\b', re.I)
@@ -333,10 +363,10 @@ def extract_id_token(colname: str) -> Optional[str]:
 def classify_col(colname: str) -> str:
     name = colname.strip().lower()
     if _CENTROID_FLAG_PAT.search(name):
-        return 'centroid'   # specific centroid_on_food signal
+        return 'centroid'
     if _X_PAT.search(name): return 'x'
     if _Y_PAT.search(name): return 'y'
-    if _FLAG_PAT.search(name): return 'flag'  # nose-based food encounter or generic flags
+    if _FLAG_PAT.search(name): return 'flag'
     if name.endswith('x'): return 'x'
     if name.endswith('y'): return 'y'
     if 'flag' in name or 'food' in name or 'enc' in name: return 'flag'
@@ -345,7 +375,6 @@ def classify_col(colname: str) -> str:
 def find_worm_sets(df: pd.DataFrame) -> Dict[str, Dict[str, str]]:
     """
     Returns mapping: worm_id -> {'x': col, 'y': col, 'flag': col?, 'centroid': col?}
-    At least x and y must exist to create a track.
     """
     cols = [str(c) for c in df.columns]
     buckets: Dict[str, Dict[str, str]] = {}
@@ -394,7 +423,6 @@ def parse_wide_file_to_long(path: Path,
                 if col == 'source_file':
                     df[col] = path.name
                 elif col == 'track_num':
-                    # If track_num missing, assign 1 per unique x/y/centroid group or per file
                     df[col] = 1
                 else:
                     df[col] = ''
@@ -405,7 +433,7 @@ def parse_wide_file_to_long(path: Path,
             
         df['assay_num'] = assay_num
         
-        # Create the new food_encounter column
+        # Create the new food_encounter column with corrected logic
         df = create_food_encounter_column(df)
         
         # Order columns and return
@@ -418,10 +446,9 @@ def parse_wide_file_to_long(path: Path,
     sets_ = find_worm_sets(df)
 
     if not sets_:
-        # attempt fallback: repeating groups (x,y,flag,centroid?) after time
+        # attempt fallback: repeating groups
         other_cols = [c for c in df.columns if c != time_col]
         if len(other_cols) >= 2:
-            # heuristic: try groups of 4 first (x,y,centroid,flag), else groups of 3 (x,y,flag)
             group_size = 4 if len(other_cols) % 4 == 0 else (3 if len(other_cols) % 3 == 0 else None)
             if group_size is None:
                 raise RuntimeError(f"{path.name}: could not detect worm column groups.")
@@ -451,8 +478,8 @@ def parse_wide_file_to_long(path: Path,
     for worm_id in sorted(sets_.keys(), key=worm_sort_key):
         cols = sets_[worm_id]
         xcol, ycol = cols.get('x'), cols.get('y')
-        flagcol = cols.get('flag')     # expected to be nose-based food encounter
-        centcol = cols.get('centroid') # centroid_on_food
+        flagcol = cols.get('flag')
+        centcol = cols.get('centroid')
 
         if xcol is None or ycol is None:
             continue
@@ -488,10 +515,10 @@ def parse_wide_file_to_long(path: Path,
         # Drop rows with NaN time
         part = part[~part['time'].isna()].reset_index(drop=True)
         
-        # Create food_encounter column for this track
+        # Create food_encounter column with corrected logic
         part = create_food_encounter_column(part)
         
-        # Enforce final order now
+        # Enforce final order
         part = enforce_column_order(part)
         rows.append(part)
 
@@ -751,10 +778,7 @@ class App(tk.Tk):
         return mode_dialog.result
 
     def _process_files_with_inference(self, files: List[Path]) -> Optional[List[Tuple[Path, Dict[str, str]]]]:
-        """
-        Process files using filename inference.
-        Returns list of (path, metadata) tuples or None if cancelled.
-        """
+        """Process files using filename inference."""
         parsed_data = []
         failed_files = []
 
@@ -792,17 +816,14 @@ class App(tk.Tk):
         return None
 
     def _process_files_manual(self, files: List[Path]) -> Optional[List[Tuple[Path, Dict[str, str]]]]:
-        """
-        Process files using manual input dialogs.
-        Returns list of (path, metadata) tuples or None if cancelled.
-        """
+        """Process files using manual input dialogs."""
         manual_data = []
         
         for path in files:
             md = FileMetaWizard(self, path.name, defaults=self.last_meta)
             self.wait_window(md)
             if md.result is None:
-                # User cancelled, ask if they want to skip this file or abort
+                # User cancelled
                 response = messagebox.askyesnocancel(
                     "File Skipped", 
                     f"Skip {path.name} and continue with remaining files?\n\n"
@@ -810,11 +831,11 @@ class App(tk.Tk):
                     "No = Abort entire process\n"
                     "Cancel = Go back to enter metadata"
                 )
-                if response is True:  # Skip this file
+                if response is True:  # Skip
                     continue
                 elif response is False:  # Abort
                     return None
-                else:  # Cancel - go back (this shouldn't happen with our dialog)
+                else:  # Go back
                     continue
             
             # Update defaults for next file
@@ -829,8 +850,8 @@ class App(tk.Tk):
         desc = ttk.Label(frm, text=(
             "Reads all .csv/.txt files from a directory (default: ./analyze),\n"
             "asks for metadata per file (manual or filename inference), and saves a composite long-format CSV.\n"
-            "Supports new wide files with centroid_on_food and nose_on_food, and re-import of long CSVs.\n"
-            "Creates food_encounter column marking only the FIRST nose-food contact per track.\n"
+            "Supports new wide files with centroid_on_food and nose_on_food.\n"
+            "FIXED: Creates food_encounter marking ONLY when nose enters FIRST (centroid stays 0).\n"
             "Filename format for inference: PC1_5.28.2025_m_wt_3hr# (PC#_date_sex_strain_treatment#)"
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
@@ -934,8 +955,8 @@ class App(tk.Tk):
         frm = self.cont_tab
         desc = ttk.Label(frm, text=(
             "Open an existing composite CSV, select a new data directory, and append new assays.\n"
-            "Assay numbering continues from the last assay_num (supports re-import of long CSVs).\n"
-            "Handles legacy food_encounter columns and creates new food_encounter logic.\n"
+            "Assay numbering continues from the last assay_num.\n"
+            "FIXED: Recreates food_encounter - labels ONLY when nose enters first (centroid stays 0).\n"
             "Supports both manual input and filename inference for new files."
         ))
         desc.grid(row=0, column=0, columnspan=3, sticky="w", pady=(0,8))
@@ -991,9 +1012,8 @@ class App(tk.Tk):
             messagebox.showerror("Error", f"Failed to read composite:\n{e}")
             return
 
-        # Handle legacy composite files - rename old food_encounter to nose_on_food if needed
+        # Handle legacy composite files
         if 'food_encounter' in composite.columns and 'nose_on_food' not in composite.columns:
-            # Check if food_encounter contains binary values (legacy nose_on_food data)
             unique_vals = set(composite['food_encounter'].dropna().astype(str).str.lower())
             if unique_vals.issubset({'0', '1', '0.0', '1.0', 'true', 'false', 'nan'}):
                 composite = composite.rename(columns={'food_encounter': 'nose_on_food'})
@@ -1003,11 +1023,11 @@ class App(tk.Tk):
         # Ensure nose_on_food exists
         if 'nose_on_food' not in composite.columns:
             composite['nose_on_food'] = 0
-            
-        # Create new food_encounter column if it doesn't exist or is the old binary format
-        if 'food_encounter' not in composite.columns:
-            composite = create_food_encounter_column(composite)
-            self._log_cont("Created new food_encounter column marking first nose-food contacts")
+        
+        # Recreate food_encounter column with corrected logic
+        composite['food_encounter'] = ''
+        composite = create_food_encounter_column(composite)
+        self._log_cont("Recreated food_encounter column with corrected logic (checks centroid state)")
         
         # Reorder columns
         composite = enforce_column_order(composite)
@@ -1021,62 +1041,61 @@ class App(tk.Tk):
 
         data_dir = Path(self.cont_data_dir_var.get().strip())
         if not data_dir.exists() or not data_dir.is_dir():
-           messagebox.showerror("Error", f"New data directory does not exist:\n{data_dir}")
-           return
+            messagebox.showerror("Error", f"New data directory does not exist:\n{data_dir}")
+            return
 
         files = sorted([p for p in data_dir.iterdir() if p.suffix.lower() in ('.csv', '.txt')])
         if not files:
-           messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
-           return
+            messagebox.showwarning("No files", f"No .csv/.txt files found in:\n{data_dir}")
+            return
 
         # Get input mode
         input_mode = self._get_input_mode()
         if input_mode is None:
             return
 
-        # Process files based on mode
+        # Process files
         if input_mode == 'inference':
             file_data = self._process_files_with_inference(files)
-        else:  # manual
+        else:
             file_data = self._process_files_manual(files)
 
         if not file_data:
             self._log_cont("Import cancelled or no valid files processed.")
             return
 
-        # Process the files
         new_rows: List[pd.DataFrame] = []
         assay_num = next_assay
 
         for path, metadata in file_data:
-           try:
-               part = parse_wide_file_to_long(
-                   path=path,
-                   assay_num=assay_num,
-                   pc_number=metadata['pc_number'],
-                   sex=metadata['sex'],
-                   strain_genotype=metadata['strain_genotype'],
-                   treatment=metadata['treatment'],
-               )
-               new_rows.append(part)
-               self._log_cont(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
-               assay_num += 1
-           except Exception as e:
-               self._log_cont(f"ERROR parsing {path.name}: {e}")
+            try:
+                part = parse_wide_file_to_long(
+                    path=path,
+                    assay_num=assay_num,
+                    pc_number=metadata['pc_number'],
+                    sex=metadata['sex'],
+                    strain_genotype=metadata['strain_genotype'],
+                    treatment=metadata['treatment'],
+                )
+                new_rows.append(part)
+                self._log_cont(f"Parsed {path.name}: assay_num={assay_num}, rows={len(part)}")
+                assay_num += 1
+            except Exception as e:
+                self._log_cont(f"ERROR parsing {path.name}: {e}")
 
         if not new_rows:
-           messagebox.showwarning("Nothing appended", "No new data imported.")
-           return
+            messagebox.showwarning("Nothing appended", "No new data imported.")
+            return
 
         updated = pd.concat([composite] + new_rows, ignore_index=True)
         try:
-           updated = enforce_column_order(updated)
-           save_path = Path(self.cont_save_var.get().strip())
-           updated.to_csv(save_path, index=False)
-           self._log_cont(f"Saved updated composite to: {save_path}")
-           messagebox.showinfo("Done", f"Updated composite saved to:\n{save_path}")
+            updated = enforce_column_order(updated)
+            save_path = Path(self.cont_save_var.get().strip())
+            updated.to_csv(save_path, index=False)
+            self._log_cont(f"Saved updated composite to: {save_path}")
+            messagebox.showinfo("Done", f"Updated composite saved to:\n{save_path}")
         except Exception as e:
-           messagebox.showerror("Save error", f"Failed to save updated composite:\n{e}")
+            messagebox.showerror("Save error", f"Failed to save updated composite:\n{e}")
 
     def _log_cont(self, msg: str):
         self.cont_log.insert("end", msg + "\n")
@@ -1084,8 +1103,8 @@ class App(tk.Tk):
         self.cont_log.update_idletasks()
 
 def main():
-   app = App()
-   app.mainloop()
+    app = App()
+    app.mainloop()
 
 if __name__ == "__main__":
-   main()
+    main()
