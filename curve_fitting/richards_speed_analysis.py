@@ -29,6 +29,141 @@ plt.rcParams["figure.dpi"] = 110
 
 
 # =============================================================================
+# Sorting and Ordering Functions
+# =============================================================================
+
+def identify_wild_type(genotypes):
+    """Identify the wild-type genotype from a list of genotypes"""
+    genotypes_clean = [str(g).strip().upper() for g in genotypes if pd.notna(g)]
+    
+    # Common WT identifiers (case-insensitive)
+    wt_identifiers = ['N2', 'WT', 'WILD-TYPE', 'WILD TYPE', 'WILDTYPE']
+    
+    for wt_id in wt_identifiers:
+        for orig_genotype in genotypes:
+            if pd.notna(orig_genotype) and str(orig_genotype).strip().upper() == wt_id:
+                return orig_genotype
+    
+    # If no match, return the first genotype (fallback)
+    return genotypes[0] if len(genotypes) > 0 else None
+
+
+def sort_genotypes(genotypes):
+    """Sort genotypes with WT first, then alphabetically"""
+    unique_genotypes = sorted(set(g for g in genotypes if pd.notna(g)))
+    if len(unique_genotypes) == 0:
+        return []
+    
+    wt = identify_wild_type(unique_genotypes)
+    
+    if wt is None:
+        return sorted(unique_genotypes)
+    
+    # WT first, then others alphabetically
+    other_genotypes = sorted([g for g in unique_genotypes if g != wt])
+    return [wt] + other_genotypes
+
+
+def sort_sexes(sexes):
+    """Sort sexes with hermaphrodite first, then male, then others"""
+    unique_sexes = sorted(set(s for s in sexes if pd.notna(s)))
+    if len(unique_sexes) == 0:
+        return []
+    
+    # Define preferred order
+    sex_order = []
+    
+    # Hermaphrodite variants (case-insensitive matching)
+    herm_variants = ['hermaphrodite', 'herm', 'h']
+    for sex in unique_sexes:
+        if str(sex).lower().strip() in herm_variants:
+            sex_order.append(sex)
+            break
+    
+    # Male variants
+    male_variants = ['male', 'm']
+    for sex in unique_sexes:
+        if str(sex).lower().strip() in male_variants and sex not in sex_order:
+            sex_order.append(sex)
+            break
+    
+    # Add any remaining sexes alphabetically
+    remaining = sorted([s for s in unique_sexes if s not in sex_order])
+    return sex_order + remaining
+
+
+def sort_treatments(treatments):
+    """Sort treatments in biological order: fed, then increasing starvation"""
+    unique_treatments = sorted(set(t for t in treatments if pd.notna(t)))
+    if len(unique_treatments) == 0:
+        return []
+    
+    # Define preferred order (fed first, then by time)
+    treatment_order_map = {
+        'fed': 0,
+        'food': 0,
+        '0min': 1,
+        '0hr': 1,
+        '30min': 2,
+        '30m': 2,
+        '1hr': 3,
+        '1h': 3,
+        '3hr': 4,
+        '3h': 4,
+        '6hr': 5,
+        '6h': 5,
+        '12hr': 6,
+        '12h': 6,
+        '24hr': 7,
+        '24h': 7,
+    }
+    
+    def get_sort_key(treatment):
+        treatment_lower = str(treatment).lower().strip()
+        if treatment_lower in treatment_order_map:
+            return (treatment_order_map[treatment_lower], treatment)
+        # Unknown treatments go at the end, sorted alphabetically
+        return (1000, treatment)
+    
+    return sorted(unique_treatments, key=get_sort_key)
+
+
+def create_hierarchical_groups(df, group_cols=['strain_genotype', 'sex', 'treatment']):
+    """
+    Create hierarchically ordered groups: Genotype → Sex → Treatment
+    Returns list of tuples in the correct order
+    """
+    if df.empty:
+        return []
+    
+    # Get unique values for each grouping level
+    genotypes = sort_genotypes(df['strain_genotype'].unique())
+    sexes = sort_sexes(df['sex'].unique())
+    treatments = sort_treatments(df['treatment'].unique())
+    
+    # Build hierarchical order
+    ordered_groups = []
+    for genotype in genotypes:
+        for sex in sexes:
+            for treatment in treatments:
+                # Check if this combination exists in the data
+                mask = (
+                    (df['strain_genotype'] == genotype) &
+                    (df['sex'] == sex) &
+                    (df['treatment'] == treatment)
+                )
+                if mask.any():
+                    ordered_groups.append((treatment, sex, genotype))
+    
+    return ordered_groups
+
+
+def format_group_label(treatment, sex, genotype):
+    """Create a readable label for a group"""
+    return f"{genotype}|{sex}|{treatment}"
+
+
+# =============================================================================
 # Preprocessing functions
 # =============================================================================
 
@@ -336,22 +471,35 @@ def fit_double(time_rel: np.ndarray, speed: np.ndarray) -> dict:
 # =============================================================================
 
 def plot_summary_by_sex_strain_treatment(df_results, param, save_path):
-    """Violin plot: param ~ (sex, strain, treatment)"""
+    """Violin plot: param ~ (genotype, sex, treatment) with hierarchical ordering"""
     print(f"DEBUG: Plotting {param} to {save_path}")
     df = df_results[df_results["converged"] & df_results[param].notna()].copy()
     if df.empty:
         print(f"DEBUG: No data for {param}, returning early")
         return
 
+    # Get hierarchically ordered groups
+    ordered_group_tuples = create_hierarchical_groups(df)
+    
+    if not ordered_group_tuples:
+        print(f"DEBUG: No groups for {param}, returning early")
+        return
+    
+    # Extract data and labels in the correct order
     groups = []
-    for (sex, strain, treat), g in df.groupby(["sex", "strain_genotype", "treatment"], dropna=False):
-        s_str = str(sex) if pd.notna(sex) else "NA"
-        strain_str = str(strain) if pd.notna(strain) else "NA"
-        treat_str = str(treat) if pd.notna(treat) else "NA"
-        groups.append((f"{s_str}|{strain_str}|{treat_str}", g[param].values))
+    for treatment, sex, genotype in ordered_group_tuples:
+        mask = (
+            (df['treatment'] == treatment) &
+            (df['sex'] == sex) &
+            (df['strain_genotype'] == genotype)
+        )
+        group_data = df[mask][param].values
+        if len(group_data) > 0:
+            label = format_group_label(treatment, sex, genotype)
+            groups.append((label, group_data))
 
     if not groups:
-        print(f"DEBUG: No groups for {param}, returning early")
+        print(f"DEBUG: No groups with data for {param}, returning early")
         return
 
     fig, ax = plt.subplots(figsize=(max(6, len(groups)*0.8), 5))
@@ -366,7 +514,7 @@ def plot_summary_by_sex_strain_treatment(df_results, param, save_path):
     ax.set_xticks(positions)
     ax.set_xticklabels(labels, rotation=45, ha="right")
     ax.set_ylabel(param)
-    ax.set_title(f"{param} by Sex | Strain | Treatment")
+    ax.set_title(f"{param} by Genotype | Sex | Treatment")
     plt.tight_layout()
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.close()
@@ -454,13 +602,13 @@ class RichardsCurveFitterGUI:
         ttk.Separator(frame, orient="horizontal").grid(row=1, column=0, columnspan=3, sticky="ew", pady=5)
         
         # Standard file loading (for non-context or ON-food only mode)
-        ttk.Label(frame, text="ON-FOOD data file:").grid(row=2, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="Primary data file:").grid(row=2, column=0, sticky="w", pady=5)
         self.file_label = ttk.Label(frame, text="No file loaded", foreground="gray")
         self.file_label.grid(row=2, column=1, sticky="w", padx=5)
-        ttk.Button(frame, text="Load ON-food CSV", command=self.load_file).grid(row=2, column=2, padx=5)
+        ttk.Button(frame, text="Load CSV", command=self.load_file).grid(row=2, column=2, padx=5)
         
         # OFF-food file loading (only for "both" mode)
-        ttk.Label(frame, text="OFF-food data file:").grid(row=3, column=0, sticky="w", pady=5)
+        ttk.Label(frame, text="OFF-food baseline:").grid(row=3, column=0, sticky="w", pady=5)
         self.off_food_label = ttk.Label(frame, text="Not required", foreground="gray")
         self.off_food_label.grid(row=3, column=1, sticky="w", padx=5)
         self.off_food_btn = ttk.Button(frame, text="Load OFF-food CSV", command=self.load_off_food, state='disabled')
@@ -907,21 +1055,65 @@ class RichardsCurveFitterGUI:
                             method=self.smooth_method_var.get(),
                         )
                     
-                    # Extract windows for OFF-food (they don't have food encounters, so just use full trace)
-                    # For OFF-food, we just want y_initial which represents baseline speed
+                    # Extract windows for OFF-food (same time window as ON-food)
+                    # Even though there's no real food encounter, we use the marked event to define the window
+                    self.log("\nExtracting time windows from OFF-food data...")
+                    self.log(f"  Using same window as ON-food: -{self.window_before}s to +{self.window_after}s")
+                    
                     windowed_off = extract_windows(df_off, 
                                                    window_before=self.window_before,
                                                    window_after=self.window_after,
                                                    min_points=10)
                     
+                    if not windowed_off:
+                        self.log("ERROR: No valid windows found in OFF-food data")
+                        self.log("       OFF-food data may be missing 'food_encounter' markers")
+                        messagebox.showerror("Error", "No valid windows in OFF-food data. Check that food_encounter column exists.")
+                        return
+                    
                     self.log(f"Found {len(windowed_off)} OFF-food animals with valid windows")
                     
-                    # Fit model to OFF-food data
-                    self.log("\nFitting curves to OFF-food baseline data...")
-                    off_food_results = self.fit_model(df_off, windowed_off, "off_food_baseline")
+                    # Calculate mean speed within the window for each animal (NO curve fitting)
+                    # This matches the temporal period used for ON-food y_initial
+                    self.log("Calculating mean speeds within windows (no curve fitting)...")
                     
-                    # Store OFF-food results temporarily for behavioral context calculation
-                    self.off_food_results = off_food_results
+                    off_food_baselines = []
+                    for (assay, track), window_data in windowed_off.items():
+                        # Get metadata from df_off
+                        animal_mask = (df_off['assay_num'] == assay) & (df_off['track_num'] == track)
+                        animal_meta = df_off[animal_mask].iloc[0] if animal_mask.any() else None
+                        
+                        if animal_meta is None:
+                            continue
+                        
+                        treatment = animal_meta['treatment'] if 'treatment' in df_off.columns else 'unknown'
+                        sex = animal_meta['sex'] if 'sex' in df_off.columns else 'unknown'
+                        genotype = animal_meta['strain_genotype'] if 'strain_genotype' in df_off.columns else 'unknown'
+                        
+                        # Calculate mean speed within this window
+                        mean_speed = window_data['speed'].mean()
+                        std_speed = window_data['speed'].std()
+                        n_points = len(window_data)
+                        
+                        off_food_baselines.append({
+                            'assay_num': assay,
+                            'track_num': track,
+                            'treatment': treatment,
+                            'sex': sex,
+                            'strain_genotype': genotype,
+                            'baseline_speed': mean_speed,
+                            'baseline_std': std_speed,
+                            'n_points': n_points
+                        })
+                    
+                    self.off_food_results = pd.DataFrame(off_food_baselines)
+                    self.log(f"Calculated windowed mean speeds for {len(self.off_food_results)} OFF-food animals")
+                    
+                    # Save OFF-food baselines
+                    off_dir = self.output_dir / "off_food_baselines"
+                    off_dir.mkdir(exist_ok=True)
+                    self.off_food_results.to_csv(off_dir / "off_food_windowed_baselines.csv", index=False)
+                    self.log(f"Saved OFF-food baselines to: off_food_windowed_baselines.csv")
                 
                 # Now calculate behavioral contexts
                 self.calculate_behavioral_context()
@@ -995,6 +1187,11 @@ class RichardsCurveFitterGUI:
         df_windowed.to_csv(model_dir / "windowed_speed_data.csv", index=False)  # Correct filename!
         
         self.log(f"  Saved results to {model_dir}")
+        
+        # Generate parameter group summaries
+        self.log(f"  Generating parameter group summaries...")
+        self.generate_parameter_summaries(df_results, model_dir, model_type)
+        
         self.root.update_idletasks()  # Update GUI
         
         # Generate parameter cheat sheet
@@ -1020,6 +1217,82 @@ class RichardsCurveFitterGUI:
         
         self.root.update_idletasks()  # Update GUI
         return df_results
+    
+    def generate_parameter_summaries(self, df_results, model_dir, model_type):
+        """Generate group-level summary statistics for Richards parameters"""
+        # Filter to converged fits only
+        converged = df_results[df_results['converged'] == True].copy()
+        
+        if len(converged) == 0:
+            self.log("    No converged fits for parameter summaries")
+            return
+        
+        group_cols = ['treatment', 'sex', 'strain_genotype']
+        
+        # Determine which parameters to summarize based on model type
+        if model_type == "single":
+            params_to_summarize = ['y_initial', 'y_final', 'A', 'B', 'M', 'nu']
+        elif model_type == "double":
+            params_to_summarize = ['y1_i', 'y1_f', 'y2_f', 'delta1', 'delta2', 
+                                   'B1', 'M1', 'nu1', 'B2', 'M2', 'nu2']
+        else:  # off_food_baseline
+            params_to_summarize = ['y_initial', 'y_final', 'A', 'B', 'M', 'nu']
+        
+        # Build summary for each group
+        summaries = []
+        for group_vals, group_data in converged.groupby(group_cols):
+            treatment, sex, genotype = group_vals
+            
+            summary = {
+                'treatment': treatment,
+                'sex': sex,
+                'genotype': genotype,
+                'n': len(group_data)
+            }
+            
+            # Calculate statistics for each parameter
+            for param in params_to_summarize:
+                if param in group_data.columns:
+                    values = group_data[param].dropna()
+                    if len(values) > 0:
+                        summary[f'{param}_mean'] = values.mean()
+                        summary[f'{param}_std'] = values.std()
+                        summary[f'{param}_sem'] = values.sem()
+                    else:
+                        summary[f'{param}_mean'] = np.nan
+                        summary[f'{param}_std'] = np.nan
+                        summary[f'{param}_sem'] = np.nan
+            
+            # Add R² statistics
+            r2_values = group_data['r_squared'].dropna()
+            if len(r2_values) > 0:
+                summary['r_squared_mean'] = r2_values.mean()
+                summary['r_squared_std'] = r2_values.std()
+                summary['r_squared_sem'] = r2_values.sem()
+            
+            summaries.append(summary)
+        
+        # Create DataFrame and save
+        summary_df = pd.DataFrame(summaries)
+        summary_path = model_dir / "parameter_group_summary.csv"
+        summary_df.to_csv(summary_path, index=False)
+        
+        self.log(f"    Saved parameter summaries for {len(summary_df)} groups: {summary_path.name}")
+        
+        # Log a preview of the summaries
+        self.log(f"\n    Parameter Group Summaries ({model_type} model):")
+        for _, row in summary_df.iterrows():
+            self.log(f"      {row['treatment']} | {row['sex']} | {row['genotype']} (n={int(row['n'])})")
+            # Show key parameters
+            if model_type == "single":
+                self.log(f"        y_initial: {row['y_initial_mean']:.4f} ± {row['y_initial_sem']:.4f}")
+                self.log(f"        y_final:   {row['y_final_mean']:.4f} ± {row['y_final_sem']:.4f}")
+                self.log(f"        B:         {row['B_mean']:.4f} ± {row['B_sem']:.4f}")
+            elif model_type == "double":
+                self.log(f"        y1_i:      {row['y1_i_mean']:.4f} ± {row['y1_i_sem']:.4f}")
+                self.log(f"        y2_f:      {row['y2_f_mean']:.4f} ± {row['y2_f_sem']:.4f}")
+                self.log(f"        B1:        {row['B1_mean']:.4f} ± {row['B1_sem']:.4f}")
+                self.log(f"        B2:        {row['B2_mean']:.4f} ± {row['B2_sem']:.4f}")
     
     def plot_r2_distribution(self, df_results, model_dir, model_type):
         """Generate R² distribution histogram with optional threshold line"""
@@ -1292,37 +1565,67 @@ class RichardsCurveFitterGUI:
             self.log("FOOD DETECTION CONTEXT (OFF-food baseline)")
             self.log("-"*60)
             
-            # Use OFF-food results that were fitted separately
+            # Use OFF-food results that were calculated as direct mean speeds
             if not hasattr(self, 'off_food_results') or self.off_food_results is None:
                 self.log("ERROR: OFF-food results not available")
                 return
             
             off_food_results = self.off_food_results.copy()
-            if model_used == "double":
-                off_food_results['y_initial'] = off_food_results['y1_i']
             
-            off_food_results = off_food_results[off_food_results['converged'] == True].copy()
-            self.log(f"OFF-food converged fits: {len(off_food_results)}")
+            self.log(f"OFF-food baseline animals: {len(off_food_results)}")
             
-            # Calculate mean OFF-food y_initial per group
-            off_baselines = off_food_results.groupby(group_cols)['y_initial'].agg(['mean', 'std', 'count']).reset_index()
-            off_baselines.columns = ['treatment', 'sex', 'strain_genotype', 'off_food_baseline', 'off_food_std', 'off_food_n']
+            # Check if OFF-food has treatment variation
+            off_treatments = off_food_results['treatment'].unique()
+            self.log(f"OFF-food treatments: {list(off_treatments)}")
             
-            self.log("\nOFF-food baselines by group:")
-            for _, row in off_baselines.iterrows():
-                self.log(f"  {row['treatment']} | {row['sex']} | {row['strain_genotype']}: " +
-                        f"{row['off_food_baseline']:.4f} ± {row['off_food_std']:.4f} mm/s (n={int(row['off_food_n'])})")
-            
-            # Merge baselines with ON-food data
-            on_food_results = on_food_results.merge(
-                off_baselines[['treatment', 'sex', 'strain_genotype', 'off_food_baseline']], 
-                on=group_cols, 
-                how='left'
-            )
+            # Determine grouping strategy
+            if len(off_treatments) == 1:
+                # OFF-food has no treatment variation - group by sex and genotype ONLY
+                self.log("OFF-food has single treatment - using sex × genotype grouping")
+                off_group_cols = ['sex', 'strain_genotype']
+                
+                off_baselines = off_food_results.groupby(off_group_cols)['baseline_speed'].agg(['mean', 'std', 'count']).reset_index()
+                off_baselines.columns = ['sex', 'strain_genotype', 'off_food_baseline', 'off_food_std', 'off_food_n']
+                
+                self.log("\nOFF-food baselines by group:")
+                for _, row in off_baselines.iterrows():
+                    self.log(f"  {row['sex']} | {row['strain_genotype']}: " +
+                            f"{row['off_food_baseline']:.4f} ± {row['off_food_std']:.4f} mm/s (n={int(row['off_food_n'])})")
+                
+                # Merge baselines with ON-food data (baseline applies to all treatments)
+                on_food_results = on_food_results.merge(
+                    off_baselines[['sex', 'strain_genotype', 'off_food_baseline']], 
+                    on=['sex', 'strain_genotype'], 
+                    how='left'
+                )
+            else:
+                # OFF-food has treatment variation - group by treatment × sex × genotype
+                self.log("OFF-food has multiple treatments - using treatment × sex × genotype grouping")
+                
+                off_baselines = off_food_results.groupby(group_cols)['baseline_speed'].agg(['mean', 'std', 'count']).reset_index()
+                off_baselines.columns = ['treatment', 'sex', 'strain_genotype', 'off_food_baseline', 'off_food_std', 'off_food_n']
+                
+                self.log("\nOFF-food baselines by group:")
+                for _, row in off_baselines.iterrows():
+                    self.log(f"  {row['treatment']} | {row['sex']} | {row['strain_genotype']}: " +
+                            f"{row['off_food_baseline']:.4f} ± {row['off_food_std']:.4f} mm/s (n={int(row['off_food_n'])})")
+                
+                # Merge baselines with ON-food data
+                on_food_results = on_food_results.merge(
+                    off_baselines[['treatment', 'sex', 'strain_genotype', 'off_food_baseline']], 
+                    on=group_cols, 
+                    how='left'
+                )
             
             # Calculate food detection score
             on_food_results['food_detection_score'] = on_food_results['y_initial'] / on_food_results['off_food_baseline']
             self.log(f"\nCalculated food detection scores for {len(on_food_results)} animals")
+            
+            # Check for missing baselines
+            missing_baselines = on_food_results['off_food_baseline'].isna().sum()
+            if missing_baselines > 0:
+                self.log(f"  WARNING: {missing_baselines} animals missing OFF-food baseline (no matching group)")
+
         
         # Food encounter context (always calculated for on_food_only and both modes)
         self.log("\n" + "-"*60)
@@ -1437,13 +1740,30 @@ class RichardsCurveFitterGUI:
         context_dir = self.output_dir / "behavioral_context"
         
         mode = self.context_mode.get()
-        group_cols = ['treatment', 'sex', 'genotype']
         
-        # Create group labels
-        summary = self.behavioral_context_summary.copy()
-        summary['group_label'] = (summary['treatment'].astype(str) + '|' + 
-                                 summary['sex'].astype(str) + '|' + 
-                                 summary['genotype'].astype(str))
+        # Get hierarchically ordered groups from the results data
+        ordered_group_tuples = create_hierarchical_groups(self.behavioral_context_results)
+        
+        # Create ordered summary with proper group labels
+        summary_rows = []
+        for treatment, sex, genotype in ordered_group_tuples:
+            # Find matching row in summary
+            mask = (
+                (self.behavioral_context_summary['treatment'] == treatment) &
+                (self.behavioral_context_summary['sex'] == sex) &
+                (self.behavioral_context_summary['genotype'] == genotype)
+            )
+            matching_rows = self.behavioral_context_summary[mask]
+            if not matching_rows.empty:
+                row = matching_rows.iloc[0].copy()
+                row['group_label'] = format_group_label(treatment, sex, genotype)
+                summary_rows.append(row)
+        
+        summary = pd.DataFrame(summary_rows)
+        
+        if summary.empty:
+            self.log("  No groups to plot")
+            return
         
         self.log("\nGenerating behavioral context plots...")
         
@@ -1454,7 +1774,7 @@ class RichardsCurveFitterGUI:
         ax.bar(x_pos, summary['food_encounter_mean'], 
                yerr=summary['food_encounter_sem'],
                capsize=5, alpha=0.7, edgecolor='black')
-        ax.set_xlabel('Group', fontsize=11)
+        ax.set_xlabel('Group (Genotype|Sex|Treatment)', fontsize=11)
         ax.set_ylabel('Food Encounter Score\n(y_final / y_initial baseline)', fontsize=11)
         ax.set_title('Food Encounter Context by Group', fontsize=13, fontweight='bold')
         ax.set_xticks(x_pos)
@@ -1474,7 +1794,7 @@ class RichardsCurveFitterGUI:
             ax.bar(x_pos, summary['food_detection_mean'], 
                    yerr=summary['food_detection_sem'],
                    capsize=5, alpha=0.7, edgecolor='black', color='orange')
-            ax.set_xlabel('Group', fontsize=11)
+            ax.set_xlabel('Group (Genotype|Sex|Treatment)', fontsize=11)
             ax.set_ylabel('Food Detection Score\n(y_initial ON / y_initial OFF)', fontsize=11)
             ax.set_title('Food Detection Context by Group', fontsize=13, fontweight='bold')
             ax.set_xticks(x_pos)
@@ -1491,14 +1811,14 @@ class RichardsCurveFitterGUI:
             self.root.update_idletasks()
             fig, ax = plt.subplots(figsize=(8, 8))
             
-            # Color by treatment
-            treatments = self.behavioral_context_results['treatment'].unique()
-            colors = plt.cm.Set2(np.linspace(0, 1, len(treatments)))
+            # Color by genotype (hierarchical coloring)
+            genotypes = sort_genotypes(self.behavioral_context_results['strain_genotype'].unique())
+            colors = plt.cm.Set2(np.linspace(0, 1, len(genotypes)))
             
-            for treatment, color in zip(treatments, colors):
-                subset = self.behavioral_context_results[self.behavioral_context_results['treatment'] == treatment]
+            for genotype, color in zip(genotypes, colors):
+                subset = self.behavioral_context_results[self.behavioral_context_results['strain_genotype'] == genotype]
                 ax.scatter(subset['food_detection_score'], subset['food_encounter_score'],
-                          label=treatment, alpha=0.6, s=50, color=color, edgecolors='black', linewidths=0.5)
+                          label=genotype, alpha=0.6, s=50, color=color, edgecolors='black', linewidths=0.5)
             
             ax.axhline(1.0, color='gray', linestyle='--', alpha=0.5)
             ax.axvline(1.0, color='gray', linestyle='--', alpha=0.5)
@@ -1520,7 +1840,7 @@ class RichardsCurveFitterGUI:
         ax1.bar(x_pos, summary['y_initial_mean'], 
                yerr=summary['y_initial_sem'],
                capsize=5, alpha=0.7, edgecolor='black', color='lightblue')
-        ax1.set_xlabel('Group', fontsize=11)
+        ax1.set_xlabel('Group (Genotype|Sex|Treatment)', fontsize=11)
         ax1.set_ylabel('Speed (mm/s)', fontsize=11)
         ax1.set_title('y_initial (Before Food Encounter)', fontsize=12, fontweight='bold')
         ax1.set_xticks(x_pos)
@@ -1531,7 +1851,7 @@ class RichardsCurveFitterGUI:
         ax2.bar(x_pos, summary['y_final_mean'], 
                yerr=summary['y_final_sem'],
                capsize=5, alpha=0.7, edgecolor='black', color='lightcoral')
-        ax2.set_xlabel('Group', fontsize=11)
+        ax2.set_xlabel('Group (Genotype|Sex|Treatment)', fontsize=11)
         ax2.set_ylabel('Speed (mm/s)', fontsize=11)
         ax2.set_title('y_final (After Food Encounter)', fontsize=12, fontweight='bold')
         ax2.set_xticks(x_pos)
